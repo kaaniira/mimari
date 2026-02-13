@@ -9,7 +9,7 @@ import uvicorn
 
 # Standart sunucu ortamı için uygulama başlatılıyor
 app = FastAPI(
-    title="Chrono-Build API",
+    title="Geleceğin Mimarı",
     description="Geleceğin Bina Analiz ve İklim Adaptasyon Sistemi API Servisi",
     version="2.0.0"
 )
