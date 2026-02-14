@@ -1,539 +1,411 @@
 import os
 import math
-import requests
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from typing import Dict, Any, Optional, List
+
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Dict, Any, Optional
+from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel, Field
 
+from google.cloud import firestore
 
-app = FastAPI(title="ChronoBuild AI Engine (WP Catalog + TS825 + ROI10)")
+# -------------------- CONFIG --------------------
+PROJECT_ID = os.environ.get("PROJECT_ID", "").strip() or None
+ADMIN_USER = os.environ.get("ADMIN_USER", "admin").strip()
+ADMIN_PASS = os.environ.get("ADMIN_PASS", "").strip()
+
+if not ADMIN_PASS:
+    # Cloud Run’da mutlaka env set et
+    print("WARNING: ADMIN_PASS env is empty. Set it for /admin security!")
+
+db = firestore.Client(project=PROJECT_ID) if PROJECT_ID else firestore.Client()
+
+app = FastAPI(title="ChronoBuild Engine + Admin (Firestore)")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # WordPress’ten çağıracaksan kalsın; istersen domain bazlı daraltırız.
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-MAX_PB_ECO_YIL = 10.0
+# -------------------- MODELS --------------------
+class InsulationItem(BaseModel):
+    name: str
+    lambda_value: float = Field(..., gt=0)     # W/mK
+    price_m3: float = Field(..., ge=0)         # TL/m3
+    carbon_m3: float = Field(..., ge=0)        # kgCO2/m3
+    active: bool = True
 
-WP_CATALOG_URL = os.environ.get("WP_CATALOG_URL", "").strip()
-WP_API_KEY = os.environ.get("WP_API_KEY", "").strip()
-NOMINATIM_EMAIL = os.environ.get("NOMINATIM_EMAIL", "").strip()
+class WindowItem(BaseModel):
+    name: str
+    u_value: float = Field(..., gt=0)          # W/m2K
+    price_m2: float = Field(0, ge=0)           # TL/m2
+    carbon_m2: float = Field(0, ge=0)          # kgCO2/m2
+    active: bool = True
 
-# TS825 Ek A.2 (Duvar Umax - derece gün bölgesine göre)
-TS825_UWALL_MAX = {1: 0.45, 2: 0.40, 3: 0.40, 4: 0.35, 5: 0.25, 6: 0.25}
+class GasTariffItem(BaseModel):
+    province: str                               # "İSTANBUL"
+    price_tl_m3: float = Field(..., gt=0)
+    active: bool = True
 
-# TS825 Ek D - iller -> derece-gün bölgeleri (özet; genişletilebilir)
-DG_ZONE_PROVINCES = {
-    1: {"ADANA", "ANTALYA", "MERSİN"},
-    2: {"ADIYAMAN", "AYDIN", "BATMAN", "DENİZLİ", "GAZİANTEP", "HATAY", "İZMIR", "KAHRAMANMARAŞ",
-        "KİLİS", "MANİSA", "MARDİN", "OSMANİYE", "SİİRT", "ŞANLIURFA"},
-    3: {"BALIKESİR", "BURSA", "ÇANAKKALE", "GİRESUN", "İSTANBUL", "KOCAELİ", "MUĞLA", "ORDU",
-        "RİZE", "SAKARYA", "SAMSUN", "SİNOP", "TEKİRDAĞ", "TRABZON", "YALOVA", "ZONGULDAK"},
-    4: {"AFYON", "AMASYA", "AKSARAY", "ANKARA", "ARTVİN", "BARTIN", "BİLECİK", "BİNGÖL", "BOLU",
-        "BURDUR", "ÇANKIRI", "ÇORUM", "DÜZCE", "DİYARBAKIR", "EDİRNE", "ELAZIĞ", "ERZİNCAN",
-        "ESKİŞEHİR", "IĞDIR", "ISPARTA", "KARABÜK", "KARAMAN", "KAYSERİ", "KIRIKKALE", "KIRKLARELİ",
-        "KIRŞEHİR", "KONYA", "KÜTAHYA", "MALATYA", "NEVŞEHİR", "NİĞDE", "ŞIRNAK", "TOKAT",
-        "TUNCELİ", "UŞAK"},
-    5: {"BAYBURT", "BİTLİS", "GÜMÜŞHANE", "HAKKARİ", "KASTAMONU", "MUŞ", "SİVAS", "VAN", "YOZGAT"},
-    6: {"AĞRI", "ARDAHAN", "ERZURUM", "KARS"},
-}
+class ConfigItem(BaseModel):
+    default_gas_tl_m3: float = Field(6.0, gt=0)
+    pv_eff: float = Field(0.22, gt=0, le=1)
+    rain_eff: float = Field(0.90, gt=0, le=1)
+    roof_ratio: float = Field(0.50, gt=0, le=1)
 
-
-class BuildingData(BaseModel):
+# Analyze input (WordPress frontend’den gelen)
+class AnalyzeInput(BaseModel):
     lat: float
     lng: float
     taban_alani: float
     kat_sayisi: int
-    kat_yuksekligi: float
-    dogalgaz_fiyat: float = 0.0  # kullanıcı girerse öncelik verilecek (istersen 0 bırak)
-    yonelim: int = 180
+    kat_yuksekligi: float = 2.8
+    dogalgaz_fiyat: float = 0.0  # 0 ise Firestore tarifesinden alınır
     senaryo: str
     mevcut_pencere: str
 
-    # opsiyonel ayarlar
     pencere_orani: float = 0.15
-    cati_orani: float = 0.5
-    su_verimi: float = 0.9
-    pv_verim: float = 0.22
-
-    # TS825 hesap varsayımları
-    r_base_layers: float = 0.50  # yalıtım harici duvar R toplamı
-
-    # Doğalgaz katsayıları
-    gaz_kwh_m3: float = 10.64
-    gaz_co2_kg_m3: float = 2.15
 
     class Config:
         extra = "ignore"
 
 
-# ---------------- WP CATALOG ----------------
-def fetch_wp_catalog() -> Dict[str, Any]:
-    if not WP_CATALOG_URL:
-        raise RuntimeError("WP_CATALOG_URL env yok. Cloud Run env'e ekleyin.")
+# -------------------- AUTH (simple) --------------------
+def require_admin(request: Request):
+    """
+    Basit BasicAuth:
+    Header: Authorization: Basic base64(user:pass)
+    Cloud Run için pratik. Daha güvenlisi: IAP / Cloud Armor / Identity Platform.
+    """
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("basic "):
+        raise HTTPException(status_code=401, detail="Auth required")
 
-    headers = {"X-CHRONO-KEY": WP_API_KEY} if WP_API_KEY else {}
-    r = requests.get(WP_CATALOG_URL, headers=headers, timeout=10)
-    if r.status_code != 200:
-        raise RuntimeError(f"WP catalog HTTP {r.status_code}")
+    import base64
+    try:
+        b64 = auth.split(" ", 1)[1].strip()
+        userpass = base64.b64decode(b64).decode("utf-8")
+        user, pwd = userpass.split(":", 1)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Bad auth")
 
-    data = r.json()
-    if "yalitimlar" not in data or "pencereler" not in data:
-        raise RuntimeError("WP catalog formatı hatalı (yalitimlar/pencereler yok).")
+    if user != ADMIN_USER or pwd != ADMIN_PASS:
+        raise HTTPException(status_code=403, detail="Forbidden")
 
-    yal = {}
-    for x in data.get("yalitimlar", []):
-        if x.get("active", True) and x.get("name") and x.get("lambda") and x.get("fiyat_m3") is not None and x.get("karbon_m3") is not None:
-            yal[str(x["name"])] = {
-                "lambda": float(x["lambda"]),
-                "fiyat_m3": float(x["fiyat_m3"]),
-                "karbon_m3": float(x["karbon_m3"]),
-            }
-
-    pen = {}
-    for x in data.get("pencereler", []):
-        if x.get("active", True) and x.get("name") and x.get("u") is not None:
-            pen[str(x["name"])] = {
-                "u": float(x["u"]),
-                "fiyat_m2": float(x.get("fiyat_m2", 0.0)),
-                "karbon_m2": float(x.get("karbon_m2", 0.0)),
-            }
-
-    tarifeler = data.get("tarifeler", {}) or {}
-    config = data.get("config", {}) or {}
-
-    if not yal:
-        raise RuntimeError("WP catalog: aktif yalıtım bulunamadı.")
-    if not pen:
-        raise RuntimeError("WP catalog: aktif pencere bulunamadı.")
-
-    return {"yalitimlar": yal, "pencereler": pen, "tarifeler": tarifeler, "config": config}
+    return True
 
 
-# ---------------- TS825 mantolama formülleri ----------------
-def ts825_u_from_R(R_total: float) -> float:
-    return 1.0 / max(1e-9, R_total)
+# -------------------- FIRESTORE HELPERS --------------------
+def _col(name: str):
+    return db.collection(name)
 
-def ts825_required_insulation_thickness_cm(
-    U_target: float, lambda_ins: float, Rsi: float, Rse: float, R_base_layers: float
-) -> int:
-    # 1/U = Rsi + R_base + R_ins + Rse  =>  R_ins = 1/U - (Rsi+R_base+Rse)
-    needed_R_ins = (1.0 / max(1e-9, U_target)) - (Rsi + R_base_layers + Rse)
-    d_m = max(0.0, needed_R_ins) * lambda_ins
-    cm = int(math.ceil(d_m * 100))
-    if cm % 2 != 0:
-        cm += 1
-    return max(0, cm)
+def set_doc(collection: str, doc_id: str, payload: Dict[str, Any]):
+    _col(collection).document(doc_id).set(payload, merge=True)
+
+def get_all_active(collection: str) -> List[Dict[str, Any]]:
+    docs = _col(collection).stream()
+    out = []
+    for d in docs:
+        obj = d.to_dict() or {}
+        obj["id"] = d.id
+        out.append(obj)
+    return out
+
+def get_config() -> Dict[str, Any]:
+    doc = _col("config").document("main").get()
+    if doc.exists:
+        return doc.to_dict() or {}
+    return {}
+
+def ensure_defaults():
+    # İlk kurulumda boşsa varsayılan config ve örnekler
+    cfg = get_config()
+    if not cfg:
+        set_doc("config", "main", ConfigItem().model_dump())
+
+    # Koleksiyonlar boşsa örnek ekle (isteğe bağlı)
+    if not list(_col("insulations").limit(1).stream()):
+        set_doc("insulations", "tas_yunu", InsulationItem(
+            name="Taş Yünü (Sert)", lambda_value=0.035, price_m3=2800, carbon_m3=150, active=True
+        ).model_dump())
+    if not list(_col("windows").limit(1).stream()):
+        set_doc("windows", "cift_cam", WindowItem(
+            name="Çift Cam (Isıcam S)", u_value=2.8, price_m2=3200, carbon_m2=25, active=True
+        ).model_dump())
+
+ensure_defaults()
 
 
-# ---------------- Geometri ----------------
-def geometry(data: BuildingData):
-    kenar = math.sqrt(max(1e-6, data.taban_alani))
-    cevre = 4 * kenar
-    brut_cephe = cevre * data.kat_yuksekligi * data.kat_sayisi
-    cam = brut_cephe * data.pencere_orani
-    duvar = brut_cephe - cam
-    cati = data.taban_alani
-    return duvar, cam, cati
+def load_catalog() -> Dict[str, Any]:
+    cfg = get_config()
+    ins = [x for x in get_all_active("insulations") if x.get("active", True)]
+    win = [x for x in get_all_active("windows") if x.get("active", True)]
+    gas = [x for x in get_all_active("gas_tariffs") if x.get("active", True)]
 
+    ins_map = {x["name"]: x for x in ins if x.get("name") and x.get("lambda_value")}
+    win_map = {x["name"]: x for x in win if x.get("name") and x.get("u_value")}
+    gas_map = {str(x.get("province", "")).strip().upper(): float(x.get("price_tl_m3", 0)) for x in gas}
 
-# ---------------- Climate (Open-Meteo) ----------------
-def calculate_hdd(temps, base=19.0):
-    return sum(max(0.0, base - t) for t in temps if t is not None)
-
-def climate_year(lat: float, lng: float, year: int, scenario: str) -> Dict[str, Any]:
-    climate_url = "https://climate-api.open-meteo.com/v1/climate"
-
-    # basit senaryo düzeltmeleri (API senaryo parametresi yoksa bile “oynatmak” için)
-    if scenario == "ssp126":
-        temp_adj, precip_adj = -0.3, 1.05
-    elif scenario == "ssp585":
-        temp_adj, precip_adj = +1.8, 0.85
-    else:
-        temp_adj, precip_adj = 0.0, 1.0
-
-    params = {
-        "latitude": lat,
-        "longitude": lng,
-        "start_date": f"{year}-01-01",
-        "end_date": f"{year}-12-31",
-        "models": "EC_Earth3P_HR",
-        "daily": ["temperature_2m_mean", "precipitation_sum", "shortwave_radiation_sum"],
-        "disable_bias_correction": "true",
+    return {
+        "config": cfg,
+        "insulations": ins_map,
+        "windows": win_map,
+        "gas_by_province": gas_map,
     }
 
-    safe = {"hdd": 2200.0, "yagis_mm": 450.0, "gunes_kwh_m2": 1550.0, "is_real": False}
 
-    try:
-        r = requests.get(climate_url, params=params, timeout=10)
-        if r.status_code != 200:
-            return safe
-        j = r.json()
-        if "daily" not in j:
-            return safe
+# -------------------- ADMIN UI --------------------
+ADMIN_HTML = """
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>ChronoBuild Admin</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <div class="max-w-6xl mx-auto p-6 space-y-6">
+    <div class="bg-white border rounded-2xl p-6 flex items-center justify-between">
+      <div>
+        <div class="text-xl font-black">ChronoBuild Admin</div>
+        <div class="text-xs text-slate-500">Firestore katalog yönetimi</div>
+      </div>
+      <div class="text-xs text-slate-500">Auth: Basic</div>
+    </div>
 
-        ts = j["daily"].get("temperature_2m_mean", []) or []
-        ps = j["daily"].get("precipitation_sum", []) or []
-        ss = j["daily"].get("shortwave_radiation_sum", []) or []
-        units = j.get("daily_units", {}) or {}
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div class="bg-white border rounded-2xl p-6">
+        <div class="font-bold mb-3">Config</div>
+        <div class="grid grid-cols-2 gap-3 text-sm">
+          <label class="block">Default gaz (TL/m³)
+            <input id="cfg_default_gas" type="number" step="0.01" class="mt-1 w-full border rounded-xl p-2"/>
+          </label>
+          <label class="block">PV verim (0-1)
+            <input id="cfg_pv" type="number" step="0.01" class="mt-1 w-full border rounded-xl p-2"/>
+          </label>
+          <label class="block">Yağmur verim (0-1)
+            <input id="cfg_rain" type="number" step="0.01" class="mt-1 w-full border rounded-xl p-2"/>
+          </label>
+          <label class="block">Çatı oranı (0-1)
+            <input id="cfg_roof" type="number" step="0.01" class="mt-1 w-full border rounded-xl p-2"/>
+          </label>
+        </div>
+        <button onclick="saveConfig()" class="mt-4 w-full bg-slate-900 text-white rounded-xl p-2 font-bold">Kaydet</button>
+      </div>
 
-        temps = [(t + temp_adj) for t in ts if t is not None]
-        if len(temps) < 50:
-            return safe
+      <div class="bg-white border rounded-2xl p-6">
+        <div class="font-bold mb-3">Yalıtım Ekle/Güncelle</div>
+        <div class="space-y-2 text-sm">
+          <input id="ins_id" placeholder="id (örn tas_yunu)" class="w-full border rounded-xl p-2"/>
+          <input id="ins_name" placeholder="ad" class="w-full border rounded-xl p-2"/>
+          <input id="ins_lambda" type="number" step="0.001" placeholder="lambda" class="w-full border rounded-xl p-2"/>
+          <input id="ins_price" type="number" step="1" placeholder="fiyat TL/m3" class="w-full border rounded-xl p-2"/>
+          <input id="ins_carbon" type="number" step="1" placeholder="karbon kgCO2/m3" class="w-full border rounded-xl p-2"/>
+          <label class="flex items-center gap-2"><input id="ins_active" type="checkbox" checked/> Aktif</label>
+        </div>
+        <button onclick="upsertInsulation()" class="mt-4 w-full bg-indigo-600 text-white rounded-xl p-2 font-bold">Kaydet</button>
+      </div>
 
-        hdd = calculate_hdd(temps, base=19.0)
-        if hdd < 500:
-            return safe
+      <div class="bg-white border rounded-2xl p-6">
+        <div class="font-bold mb-3">Pencere Ekle/Güncelle</div>
+        <div class="space-y-2 text-sm">
+          <input id="win_id" placeholder="id (örn cift_cam)" class="w-full border rounded-xl p-2"/>
+          <input id="win_name" placeholder="ad" class="w-full border rounded-xl p-2"/>
+          <input id="win_u" type="number" step="0.01" placeholder="U değeri" class="w-full border rounded-xl p-2"/>
+          <input id="win_price" type="number" step="1" placeholder="fiyat TL/m2" class="w-full border rounded-xl p-2"/>
+          <input id="win_carbon" type="number" step="1" placeholder="karbon kgCO2/m2" class="w-full border rounded-xl p-2"/>
+          <label class="flex items-center gap-2"><input id="win_active" type="checkbox" checked/> Aktif</label>
+        </div>
+        <button onclick="upsertWindow()" class="mt-4 w-full bg-emerald-600 text-white rounded-xl p-2 font-bold">Kaydet</button>
+      </div>
+    </div>
 
-        yagis = sum(p for p in ps if p is not None) * precip_adj
+    <div class="bg-white border rounded-2xl p-6">
+      <div class="font-bold mb-3">Doğalgaz Tarifesi (İl bazlı)</div>
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-3 text-sm">
+        <input id="gas_id" placeholder="id (örn istanbul)" class="border rounded-xl p-2"/>
+        <input id="gas_prov" placeholder="İL (İSTANBUL)" class="border rounded-xl p-2"/>
+        <input id="gas_price" type="number" step="0.01" placeholder="TL/m3" class="border rounded-xl p-2"/>
+        <label class="flex items-center gap-2 border rounded-xl p-2 justify-center"><input id="gas_active" type="checkbox" checked/> Aktif</label>
+      </div>
+      <button onclick="upsertGas()" class="mt-4 w-full bg-amber-500 text-white rounded-xl p-2 font-bold">Kaydet</button>
+    </div>
 
-        sun_sum = sum(s for s in ss if s is not None)
-        sun_unit = units.get("shortwave_radiation_sum", "")
-        if "MJ" in sun_unit:
-            gunes_kwh_m2 = sun_sum / 3.6
-        elif "Wh" in sun_unit:
-            gunes_kwh_m2 = sun_sum / 1000.0
-        else:
-            gunes_kwh_m2 = sun_sum / 3.6
+    <div class="bg-white border rounded-2xl p-6">
+      <div class="font-bold mb-3">Mevcut Katalog</div>
+      <pre id="catalog" class="text-xs bg-slate-900 text-slate-100 p-4 rounded-xl overflow-auto max-h-[420px]"></pre>
+      <button onclick="loadCatalog()" class="mt-4 w-full bg-slate-700 text-white rounded-xl p-2 font-bold">Yenile</button>
+    </div>
+  </div>
 
-        return {"hdd": float(hdd), "yagis_mm": float(yagis), "gunes_kwh_m2": float(gunes_kwh_m2), "is_real": True}
-    except:
-        return safe
+<script>
+  async function api(path, method="GET", body=null){
+    const res = await fetch(path, {
+      method,
+      headers: {"Content-Type":"application/json"},
+      body: body ? JSON.stringify(body) : null
+    });
+    if(!res.ok){
+      const t = await res.text();
+      throw new Error(res.status + " " + t);
+    }
+    return res.json();
+  }
+
+  async function loadCatalog(){
+    const data = await api("/admin/api/catalog");
+    document.getElementById("catalog").textContent = JSON.stringify(data, null, 2);
+
+    const cfg = data.config || {};
+    document.getElementById("cfg_default_gas").value = cfg.default_gas_tl_m3 ?? 6.0;
+    document.getElementById("cfg_pv").value = cfg.pv_eff ?? 0.22;
+    document.getElementById("cfg_rain").value = cfg.rain_eff ?? 0.90;
+    document.getElementById("cfg_roof").value = cfg.roof_ratio ?? 0.50;
+  }
+
+  async function saveConfig(){
+    const body = {
+      default_gas_tl_m3: parseFloat(document.getElementById("cfg_default_gas").value || "6"),
+      pv_eff: parseFloat(document.getElementById("cfg_pv").value || "0.22"),
+      rain_eff: parseFloat(document.getElementById("cfg_rain").value || "0.90"),
+      roof_ratio: parseFloat(document.getElementById("cfg_roof").value || "0.50")
+    };
+    await api("/admin/api/config", "PUT", body);
+    await loadCatalog();
+    alert("Config kaydedildi");
+  }
+
+  async function upsertInsulation(){
+    const id = document.getElementById("ins_id").value.trim();
+    const body = {
+      name: document.getElementById("ins_name").value.trim(),
+      lambda_value: parseFloat(document.getElementById("ins_lambda").value),
+      price_m3: parseFloat(document.getElementById("ins_price").value),
+      carbon_m3: parseFloat(document.getElementById("ins_carbon").value),
+      active: document.getElementById("ins_active").checked
+    };
+    await api("/admin/api/insulations/" + encodeURIComponent(id), "PUT", body);
+    await loadCatalog();
+    alert("Yalıtım kaydedildi");
+  }
+
+  async function upsertWindow(){
+    const id = document.getElementById("win_id").value.trim();
+    const body = {
+      name: document.getElementById("win_name").value.trim(),
+      u_value: parseFloat(document.getElementById("win_u").value),
+      price_m2: parseFloat(document.getElementById("win_price").value || "0"),
+      carbon_m2: parseFloat(document.getElementById("win_carbon").value || "0"),
+      active: document.getElementById("win_active").checked
+    };
+    await api("/admin/api/windows/" + encodeURIComponent(id), "PUT", body);
+    await loadCatalog();
+    alert("Pencere kaydedildi");
+  }
+
+  async function upsertGas(){
+    const id = document.getElementById("gas_id").value.trim();
+    const body = {
+      province: document.getElementById("gas_prov").value.trim(),
+      price_tl_m3: parseFloat(document.getElementById("gas_price").value),
+      active: document.getElementById("gas_active").checked
+    };
+    await api("/admin/api/gas_tariffs/" + encodeURIComponent(id), "PUT", body);
+    await loadCatalog();
+    alert("Tarife kaydedildi");
+  }
+
+  loadCatalog();
+</script>
+</body>
+</html>
+"""
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_page(_: bool = Depends(require_admin)):
+    return ADMIN_HTML
 
 
-# ---------------- Province / TS825 zone ----------------
-def reverse_geocode_province(lat: float, lng: float) -> Optional[str]:
-    try:
-        url = "https://nominatim.openstreetmap.org/reverse"
-        params = {"format": "jsonv2", "lat": lat, "lon": lng, "zoom": 10, "addressdetails": 1}
-        ua = f"ChronoBuild/1.0 ({NOMINATIM_EMAIL})" if NOMINATIM_EMAIL else "ChronoBuild/1.0 (educational)"
-        headers = {"User-Agent": ua}
-        r = requests.get(url, params=params, headers=headers, timeout=8)
-        if r.status_code != 200:
-            return None
-        j = r.json()
-        addr = j.get("address", {}) or {}
-        cand = addr.get("province") or addr.get("state") or addr.get("county")
-        if not cand:
-            return None
-        return cand.strip().upper().replace("İ", "İ")
-    except:
-        return None
+# -------------------- ADMIN API --------------------
+@app.get("/admin/api/catalog")
+def admin_get_catalog(_: bool = Depends(require_admin)):
+    return load_catalog()
 
-def degree_day_zone_from_province(prov: Optional[str]) -> int:
-    if not prov:
-        return 3
-    for zone, provs in DG_ZONE_PROVINCES.items():
-        if prov in provs:
-            return zone
-    return 3
+@app.put("/admin/api/config")
+def admin_put_config(item: ConfigItem, _: bool = Depends(require_admin)):
+    set_doc("config", "main", item.model_dump())
+    return {"ok": True}
+
+@app.put("/admin/api/insulations/{doc_id}")
+def admin_put_insulation(doc_id: str, item: InsulationItem, _: bool = Depends(require_admin)):
+    set_doc("insulations", doc_id, item.model_dump())
+    return {"ok": True, "id": doc_id}
+
+@app.put("/admin/api/windows/{doc_id}")
+def admin_put_window(doc_id: str, item: WindowItem, _: bool = Depends(require_admin)):
+    set_doc("windows", doc_id, item.model_dump())
+    return {"ok": True, "id": doc_id}
+
+@app.put("/admin/api/gas_tariffs/{doc_id}")
+def admin_put_gas(doc_id: str, item: GasTariffItem, _: bool = Depends(require_admin)):
+    payload = item.model_dump()
+    payload["province"] = payload["province"].strip().upper()
+    set_doc("gas_tariffs", doc_id, payload)
+    return {"ok": True, "id": doc_id}
 
 
-# ---------------- Energy + investment ----------------
-def annual_energy_from_U(data: BuildingData, hdd: float, u_wall: float, u_win: float) -> Dict[str, float]:
-    duvar, cam, _ = geometry(data)
-    enerji_kwh = ((u_wall * duvar) + (u_win * cam)) * hdd * 24.0 / 1000.0
-    gaz_m3 = enerji_kwh / max(1e-9, data.gaz_kwh_m3)
-    gaz_fiyat = data.dogalgaz_fiyat if data.dogalgaz_fiyat > 0 else 6.0
-    tutar = gaz_m3 * gaz_fiyat
-    co2 = gaz_m3 * data.gaz_co2_kg_m3
-    return {"enerji_kwh": enerji_kwh, "gaz_m3": gaz_m3, "tutar_tl": tutar, "co2_kg": co2}
-
-def investment_insulation(duvar_alan: float, kal_cm: int, mat: dict) -> Dict[str, float]:
-    vol = duvar_alan * (kal_cm / 100.0)
-    cost = vol * mat["fiyat_m3"]
-    emb = vol * mat["karbon_m3"]
-    return {"vol_m3": vol, "cost_tl": cost, "emb_kg": emb}
-
-def investment_window(cam_alan: float, win: dict) -> Dict[str, float]:
-    cost = cam_alan * float(win.get("fiyat_m2", 0.0))
-    emb = cam_alan * float(win.get("karbon_m2", 0.0))
-    return {"cost_tl": cost, "emb_kg": emb}
-
+# -------------------- ANALYZE (placeholder) --------------------
+# Burada sadece katalog Firestore’dan geliyor. TS825 kısmını bir sonraki adımda PDF’ye göre “birebir” bağlayacağız.
 
 @app.post("/analyze")
-async def analyze_building(data: BuildingData):
+def analyze(inp: AnalyzeInput):
     try:
-        catalog = fetch_wp_catalog()
-        cfg = catalog.get("config", {}) or {}
-        tarifeler = catalog.get("tarifeler", {}) or {}
+        cat = load_catalog()
+        cfg = cat.get("config", {})
+        ins_db = cat.get("insulations", {})
+        win_db = cat.get("windows", {})
+        gas_by = cat.get("gas_by_province", {})
 
-        # config override (WP’den)
-        data.pv_verim = float(cfg.get("pv_verim", data.pv_verim))
-        data.su_verimi = float(cfg.get("su_verimi", data.su_verimi))
-        data.cati_orani = float(cfg.get("cati_orani", data.cati_orani))
+        if not ins_db or not win_db:
+            raise HTTPException(500, "Katalog boş. /admin'den ürün ekleyin.")
 
-        # il & TS825 zone
-        prov = reverse_geocode_province(data.lat, data.lng)
-        zone = degree_day_zone_from_province(prov)
-        u_wall_max = TS825_UWALL_MAX[zone]
+        # Gaz fiyatı: kullanıcı 0 ise default
+        gas_price = float(inp.dogalgaz_fiyat) if inp.dogalgaz_fiyat and inp.dogalgaz_fiyat > 0 else float(cfg.get("default_gas_tl_m3", 6.0))
 
-        # gaz fiyatı (WP -> il bazlı -> default) / kullanıcı girişi varsa üstün
-        default_gas = float(tarifeler.get("default_gas_tl_m3", 6.0))
-        by_prov = tarifeler.get("by_province", {}) or {}
-        wp_gas = default_gas
-        if prov and prov in by_prov:
-            try:
-                wp_gas = float(by_prov[prov])
-            except:
-                wp_gas = default_gas
-        if data.dogalgaz_fiyat and data.dogalgaz_fiyat > 0:
-            pass  # kullanıcı üstün
-        else:
-            data.dogalgaz_fiyat = wp_gas
+        # Mevcut pencere eşleştirme
+        win_mevcut = win_db.get(inp.mevcut_pencere) or next(iter(win_db.values()))
+        u_mevcut = float(win_mevcut["u_value"])
 
-        # iklim
-        clim_now = climate_year(data.lat, data.lng, 2020, data.senaryo)
-        clim_2050 = climate_year(data.lat, data.lng, 2050, data.senaryo)
-
-        # geometri
-        duvar, cam, _ = geometry(data)
-
-        # pencere (mevcut)
-        p_db = catalog["pencereler"]
-        win_mevcut = p_db.get(data.mevcut_pencere) or p_db.get("Çift Cam (Isıcam S)") or next(iter(p_db.values()))
-        u_win_mevcut = float(win_mevcut["u"])
-
-        # TS825 yüzey dirençleri (standart kullanım)
-        Rsi, Rse = 0.13, 0.04
-
-        # --- TS825 Baz: Umax sağlayan en düşük yatırım maliyetli yalıtımı seç ---
-        y_db = catalog["yalitimlar"]
-        best_ts = None
-        best_ts_cost = 1e30
-
-        for y_name, mat in y_db.items():
-            kal_cm = ts825_required_insulation_thickness_cm(
-                U_target=u_wall_max,
-                lambda_ins=float(mat["lambda"]),
-                Rsi=Rsi,
-                Rse=Rse,
-                R_base_layers=float(data.r_base_layers),
-            )
-            R_total = Rsi + float(data.r_base_layers) + (kal_cm / 100.0) / max(1e-9, float(mat["lambda"])) + Rse
-            u_wall = ts825_u_from_R(R_total)
-
-            inv = investment_insulation(duvar, kal_cm, mat)
-            if inv["cost_tl"] < best_ts_cost:
-                best_ts_cost = inv["cost_tl"]
-                best_ts = {"yalitim": y_name, "kalinlik_cm": int(kal_cm), "u_wall": float(u_wall)}
-
-        base_now = annual_energy_from_U(data, clim_now["hdd"], best_ts["u_wall"], u_win_mevcut)
-        base_2050 = annual_energy_from_U(data, clim_2050["hdd"], best_ts["u_wall"], u_win_mevcut)
-
-        mevcut = {
-            "province": prov or "Bilinmiyor",
-            "ts825_zone": zone,
-            "u_wall_max": u_wall_max,
-            "yalitim": best_ts["yalitim"],
-            "kalinlik_cm": best_ts["kalinlik_cm"],
-            "u_wall": round(best_ts["u_wall"], 3),
-            "pencere": data.mevcut_pencere,
-            "gaz_fiyat_tl_m3": round(float(data.dogalgaz_fiyat), 3),
-            "today": {
-                "hdd": int(round(clim_now["hdd"])),
-                "yillik_gaz_m3": int(round(base_now["gaz_m3"])),
-                "yillik_tutar_tl": int(round(base_now["tutar_tl"])),
-                "yillik_co2_kg": int(round(base_now["co2_kg"])),
-            },
-            "y2050": {
-                "hdd": int(round(clim_2050["hdd"])),
-                "yillik_gaz_m3": int(round(base_2050["gaz_m3"])),
-                "yillik_tutar_tl": int(round(base_2050["tutar_tl"])),
-                "yillik_co2_kg": int(round(base_2050["co2_kg"])),
-            },
-        }
-
-        # --- AI tarama: 10 yıl altını öncelikle seç ---
-        best_under_10 = None
-        best_under_10_score = 1e30
-        best_any = None
-        best_any_score = 1e30
-
-        def build_candidate(y_name, mat, kal_cm, u_wall, p_name, win) -> Dict[str, Any]:
-            u_win = float(win["u"])
-            ai_2050 = annual_energy_from_U(data, clim_2050["hdd"], u_wall, u_win)
-
-            tasarruf_tl = base_2050["tutar_tl"] - ai_2050["tutar_tl"]
-            tasarruf_co2 = base_2050["co2_kg"] - ai_2050["co2_kg"]
-            tasarruf_gaz = base_2050["gaz_m3"] - ai_2050["gaz_m3"]
-
-            inv_ins = investment_insulation(duvar, kal_cm, mat)
-            inv_win = investment_window(cam, win)
-            yatirim = inv_ins["cost_tl"] + inv_win["cost_tl"]
-            embodied = inv_ins["emb_kg"] + inv_win["emb_kg"]
-
-            pb_eco = (yatirim / tasarruf_tl) if tasarruf_tl > 0 else 99.0
-            pb_carb = (embodied / tasarruf_co2) if tasarruf_co2 > 0 else 99.0
-
-            return {
-                "yalitim": y_name,
-                "kalinlik_cm": int(kal_cm),
-                "u_wall": round(float(u_wall), 3),
-                "pencere": p_name,
-                "u_pencere": round(float(u_win), 2),
-                "y2050": {
-                    "yillik_gaz_m3": int(round(ai_2050["gaz_m3"])),
-                    "yillik_tutar_tl": int(round(ai_2050["tutar_tl"])),
-                    "yillik_co2_kg": int(round(ai_2050["co2_kg"])),
-                },
-                "tasarruf": {
-                    "yillik_tasarruf_tl": int(round(tasarruf_tl)),
-                    "yillik_gaz_tasarruf_m3": int(round(tasarruf_gaz)),
-                    "yillik_co2_tasarruf_kg": int(round(tasarruf_co2)),
-                },
-                "yatirim": {
-                    "yatirim_tl": int(round(yatirim)),
-                    "embodied_co2_kg": int(round(embodied)),
-                },
-                "pb_eco_yil": round(pb_eco, 1),
-                "pb_carb_yil": round(pb_carb, 1),
-                "max_pb_eco_yil": MAX_PB_ECO_YIL,
-            }
-
-        for y_name, mat in y_db.items():
-            kal_cm = ts825_required_insulation_thickness_cm(
-                U_target=u_wall_max,
-                lambda_ins=float(mat["lambda"]),
-                Rsi=Rsi,
-                Rse=Rse,
-                R_base_layers=float(data.r_base_layers),
-            )
-            R_total = Rsi + float(data.r_base_layers) + (kal_cm / 100.0) / max(1e-9, float(mat["lambda"])) + Rse
-            u_wall = ts825_u_from_R(R_total)
-
-            for p_name, win in p_db.items():
-                cand = build_candidate(y_name, mat, kal_cm, u_wall, p_name, win)
-                score = float(cand["pb_eco_yil"]) + float(cand["pb_carb_yil"])
-
-                if score < best_any_score:
-                    best_any_score = score
-                    best_any = cand
-
-                if cand["pb_eco_yil"] <= MAX_PB_ECO_YIL and score < best_under_10_score:
-                    best_under_10_score = score
-                    best_under_10 = cand
-
-        best_ai = best_under_10 if best_under_10 else best_any
-
-        # --- 10 yıl altı yoksa alternatif yöntem öner ---
-        alternatif = None
-        uyari = None
-
-        if best_under_10 is None:
-            uyari = f"Ekonomik geri ödeme hedefi (≤{MAX_PB_ECO_YIL} yıl) için uygun kombinasyon bulunamadı. Alternatif yöntem öneriliyor."
-
-            # A) sadece pencere yükseltmesi (TS825 baz yalıtım sabit)
-            best_win = None
-            best_win_pb = 1e30
-            for p_name, win in p_db.items():
-                u_win = float(win["u"])
-                ai_2050 = annual_energy_from_U(data, clim_2050["hdd"], best_ts["u_wall"], u_win)
-
-                tasarruf_tl = base_2050["tutar_tl"] - ai_2050["tutar_tl"]
-                tasarruf_co2 = base_2050["co2_kg"] - ai_2050["co2_kg"]
-
-                inv_win = investment_window(cam, win)
-                yatirim = inv_win["cost_tl"]
-                embodied = inv_win["emb_kg"]
-
-                pb_eco = (yatirim / tasarruf_tl) if tasarruf_tl > 0 else 99.0
-                pb_carb = (embodied / tasarruf_co2) if tasarruf_co2 > 0 else 99.0
-
-                if pb_eco < best_win_pb:
-                    best_win_pb = pb_eco
-                    best_win = {
-                        "tip": "Sadece Pencere Yükseltmesi",
-                        "yalitim": best_ts["yalitim"],
-                        "kalinlik_cm": best_ts["kalinlik_cm"],
-                        "pencere": p_name,
-                        "pb_eco_yil": round(pb_eco, 1),
-                        "pb_carb_yil": round(pb_carb, 1),
-                        "yatirim_tl": int(round(yatirim)),
-                        "embodied_co2_kg": int(round(embodied)),
-                        "yillik_tasarruf_tl": int(round(tasarruf_tl)),
-                    }
-
-            # B) sadece yalıtım (mevcut pencere sabit)
-            best_ins = None
-            best_ins_pb = 1e30
-            for y_name, mat in y_db.items():
-                kal_cm = ts825_required_insulation_thickness_cm(
-                    U_target=u_wall_max,
-                    lambda_ins=float(mat["lambda"]),
-                    Rsi=Rsi,
-                    Rse=Rse,
-                    R_base_layers=float(data.r_base_layers),
-                )
-                R_total = Rsi + float(data.r_base_layers) + (kal_cm / 100.0) / max(1e-9, float(mat["lambda"])) + Rse
-                u_wall = ts825_u_from_R(R_total)
-
-                ai_2050 = annual_energy_from_U(data, clim_2050["hdd"], u_wall, u_win_mevcut)
-
-                tasarruf_tl = base_2050["tutar_tl"] - ai_2050["tutar_tl"]
-                tasarruf_co2 = base_2050["co2_kg"] - ai_2050["co2_kg"]
-
-                inv_ins = investment_insulation(duvar, kal_cm, mat)
-                yatirim = inv_ins["cost_tl"]
-                embodied = inv_ins["emb_kg"]
-
-                pb_eco = (yatirim / tasarruf_tl) if tasarruf_tl > 0 else 99.0
-                pb_carb = (embodied / tasarruf_co2) if tasarruf_co2 > 0 else 99.0
-
-                if pb_eco < best_ins_pb:
-                    best_ins_pb = pb_eco
-                    best_ins = {
-                        "tip": "Sadece Yalıtım Optimizasyonu",
-                        "yalitim": y_name,
-                        "kalinlik_cm": int(kal_cm),
-                        "pencere": data.mevcut_pencere,
-                        "pb_eco_yil": round(pb_eco, 1),
-                        "pb_carb_yil": round(pb_carb, 1),
-                        "yatirim_tl": int(round(yatirim)),
-                        "embodied_co2_kg": int(round(embodied)),
-                        "yillik_tasarruf_tl": int(round(tasarruf_tl)),
-                    }
-
-            candidates = [c for c in [best_win, best_ins] if c is not None]
-            under10 = [c for c in candidates if c["pb_eco_yil"] <= MAX_PB_ECO_YIL]
-            if under10:
-                alternatif = min(under10, key=lambda x: x["pb_eco_yil"])
-            elif candidates:
-                alternatif = min(candidates, key=lambda x: x["pb_eco_yil"])
-
-        # Su & PV (2050)
-        su_m3 = data.taban_alani * (clim_2050["yagis_mm"] / 1000.0) * data.su_verimi
-        pv_kwh = (data.taban_alani * data.cati_orani) * clim_2050["gunes_kwh_m2"] * data.pv_verim
-
-        best_ai["su_hasadi_m3_yil"] = round(su_m3, 1)
-        best_ai["pv_kwh_yil"] = int(round(pv_kwh))
-        best_ai["uyari"] = uyari
-        best_ai["alternatif_oneri"] = alternatif
-
+        # Şimdilik demo çıktı (TS825 hesaplarını sonraki mesajda ekleyeceğiz)
         return {
-            "iklim_info": {
-                "today": {
-                    "hdd": int(round(clim_now["hdd"])),
-                    "yagis_mm": int(round(clim_now["yagis_mm"])),
-                },
-                "y2050": {
-                    "hdd": int(round(clim_2050["hdd"])),
-                    "yagis_mm": int(round(clim_2050["yagis_mm"])),
-                    "gunes_kwh_m2": int(round(clim_2050["gunes_kwh_m2"])),
-                    "is_real": bool(clim_2050["is_real"]),
-                },
+            "config_used": {
+                "default_gas_tl_m3": cfg.get("default_gas_tl_m3", 6.0),
+                "pv_eff": cfg.get("pv_eff", 0.22),
+                "rain_eff": cfg.get("rain_eff", 0.90),
+                "roof_ratio": cfg.get("roof_ratio", 0.50),
             },
-            "mevcut": mevcut,
-            "ai_onerisi": best_ai,
+            "mevcut": {
+                "pencere": inp.mevcut_pencere,
+                "u_pencere": u_mevcut,
+                "gaz_fiyat_tl_m3": gas_price
+            },
+            "ai_onerisi": {
+                "note": "DB/admin altyapısı aktif. TS825+2050 hesap bloğunu bir sonraki adımda PDF’ye göre entegre edeceğiz.",
+                "ornek_yalitim_sayisi": len(ins_db),
+                "ornek_pencere_sayisi": len(win_db),
+            }
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(500, str(e))
 
 
+# -------------------- RUN --------------------
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", "8080"))
