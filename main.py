@@ -1,3 +1,4 @@
+import os
 import math
 import requests
 from fastapi import FastAPI, HTTPException
@@ -5,7 +6,7 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Dict, Any
 
-app = FastAPI(title="Geleceğin Mimarı AI Engine - TS825 Mantolama")
+app = FastAPI(title="Geleceğin Mimarı AI Engine - TS825 + ROI10")
 
 app.add_middleware(
     CORSMiddleware,
@@ -14,9 +15,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ----------------------------
-# MALZEME VERİTABANI (seninki)
-# ----------------------------
+MAX_PB_ECO_YIL = 10.0  # ekonomik geri ödeme üst sınır
+
 MALZEME_DB = {
     "yalitimlar": {
         "Taş Yünü (Sert)": {"lambda": 0.035, "karbon_m3": 150, "fiyat_m3": 2800},
@@ -31,22 +31,10 @@ MALZEME_DB = {
     }
 }
 
-# ---------------------------------------------------------
-# TS 825 Ek A.2: Bölgelere göre tavsiye edilen U_max (DUVAR)
-# ---------------------------------------------------------
-TS825_UWALL_MAX = {
-    1: 0.45,
-    2: 0.40,
-    3: 0.40,
-    4: 0.35,
-    5: 0.25,
-    6: 0.25,
-}
+# TS825 Ek A.2 (Duvar Umax tavsiye değerleri)
+TS825_UWALL_MAX = {1: 0.45, 2: 0.40, 3: 0.40, 4: 0.35, 5: 0.25, 6: 0.25}
 
-# ---------------------------------------------------------
-# TS 825 Ek D: İllere göre derece gün bölgeleri (ÖZET LİSTE)
-# (PDF'te daha uzun; burada il merkezlerini kapsayan ana liste)
-# ---------------------------------------------------------
+# TS825 Ek D iller -> derece-gün bölgeleri (özet; ihtiyaç oldukça genişletilebilir)
 DG_ZONE_PROVINCES = {
     1: {"ADANA", "ANTALYA", "MERSİN"},
     2: {"ADIYAMAN", "AYDIN", "BATMAN", "DENİZLİ", "GAZİANTEP", "HATAY", "İZMIR", "KAHRAMANMARAŞ",
@@ -62,67 +50,47 @@ DG_ZONE_PROVINCES = {
     6: {"AĞRI", "ARDAHAN", "ERZURUM", "KARS"},
 }
 
-# ----------------------------
-# API INPUT
-# ----------------------------
 class BuildingData(BaseModel):
     lat: float
     lng: float
     taban_alani: float
     kat_sayisi: int
     kat_yuksekligi: float
-    dogalgaz_fiyat: float  # TL/m3 (kullanıcı girişi)
+    dogalgaz_fiyat: float  # TL/m3
     yonelim: int = 180
     senaryo: str
     mevcut_pencere: str
 
-    # (opsiyonel) varsayılanlar
-    pencere_orani: float = 0.15      # cephe pencere oranı
-    cati_orani: float = 0.5          # PV kurulabilir çatı oranı
-    su_verimi: float = 0.9           # yağmur suyu verimi
-    pv_verim: float = 0.22           # PV verim
-    baz_ic_sicaklik: float = 19.0    # HDD base temp
+    # opsiyoneller
+    pencere_orani: float = 0.15
+    cati_orani: float = 0.5
+    su_verimi: float = 0.9
+    pv_verim: float = 0.22
 
-    # TS825 formülünde Rsi/Rse doğrudan kullanılır (Çizelge 2)
-    # Baz duvar katman direnci (yalıtım HARİÇ) sistem varsayımıdır.
-    # İstersen frontend'e "duvar_tipi" ekleriz.
-    r_base_layers: float = 0.50
+    baz_ic_sicaklik: float = 19.0
+    r_base_layers: float = 0.50  # yalıtım hariç baz duvar R toplamı (sistem varsayımı)
 
-    # Enerji dönüşümleri
-    gaz_kwh_m3: float = 10.64        # kWh / m3
-    gaz_co2_kg_m3: float = 2.15      # kgCO2 / m3
+    gaz_kwh_m3: float = 10.64
+    gaz_co2_kg_m3: float = 2.15
 
     class Config:
         extra = "ignore"
 
-# ----------------------------
-# TS 825 FORMÜLLERİ (mantolama)
-# ----------------------------
+
+# --- TS825 mantolama (formül) ---
 def ts825_u_from_R(R_total: float) -> float:
-    # TS825: U = 1 / (Rsi + Σ(di/λi) + Rse)
     return 1.0 / max(1e-9, R_total)
 
-def ts825_required_insulation_thickness_cm(
-    U_target: float,
-    lambda_ins: float,
-    Rsi: float,
-    Rse: float,
-    R_base_layers: float
-) -> int:
-    # TS825’den türetilmiş cebir:
-    # 1/U_target = Rsi + R_base_layers + (d/λ) + Rse
-    # d = λ * (1/U_target - (Rsi + R_base_layers + Rse))
+def ts825_required_insulation_thickness_cm(U_target: float, lambda_ins: float, Rsi: float, Rse: float, R_base_layers: float) -> int:
     needed = (1.0 / max(1e-9, U_target)) - (Rsi + R_base_layers + Rse)
     d_m = max(0.0, needed) * lambda_ins
     cm = int(math.ceil(d_m * 100))
-    # pratik yuvarlama
     if cm % 2 != 0:
         cm += 1
     return max(0, cm)
 
-# ----------------------------
-# GEOMETRİ (basit)
-# ----------------------------
+
+# --- Geometri ---
 def geometry(data: BuildingData):
     kenar = math.sqrt(max(1e-6, data.taban_alani))
     cevre = 4 * kenar
@@ -132,19 +100,16 @@ def geometry(data: BuildingData):
     cati = data.taban_alani
     return duvar, cam, cati
 
-# ----------------------------
-# HDD (basit)
-# ----------------------------
+
+# --- HDD ---
 def calculate_hdd(temps, base=19.0):
     return sum(max(0.0, base - t) for t in temps if t is not None)
 
-# ----------------------------
-# Open-Meteo (2050)
-# ----------------------------
+
+# --- Open-Meteo climate ---
 def climate_year(lat: float, lng: float, year: int, scenario: str) -> Dict[str, Any]:
     climate_url = "https://climate-api.open-meteo.com/v1/climate"
 
-    # senaryo düzeltmesi (sadece senin senaryo tuşunun etkisini korumak için)
     if scenario == "ssp126":
         temp_adj, precip_adj = -0.3, 1.05
     elif scenario == "ssp585":
@@ -162,7 +127,7 @@ def climate_year(lat: float, lng: float, year: int, scenario: str) -> Dict[str, 
         "disable_bias_correction": "true"
     }
 
-    safe = {"hdd": 2200, "yagis_mm": 450, "gunes_kwh_m2": 1550, "is_real": False}
+    safe = {"hdd": 2200.0, "yagis_mm": 450.0, "gunes_kwh_m2": 1550.0, "is_real": False}
 
     try:
         r = requests.get(climate_url, params=params, timeout=8)
@@ -187,7 +152,6 @@ def climate_year(lat: float, lng: float, year: int, scenario: str) -> Dict[str, 
 
         yagis = sum(p for p in ps if p is not None) * precip_adj
 
-        # shortwave birimi MJ/m2 ise /3.6; Wh/m2 ise /1000
         sun_sum = sum(s for s in ss if s is not None)
         sun_unit = units.get("shortwave_radiation_sum", "")
         if "MJ" in sun_unit:
@@ -197,18 +161,12 @@ def climate_year(lat: float, lng: float, year: int, scenario: str) -> Dict[str, 
         else:
             gunes_kwh_m2 = sun_sum / 3.6
 
-        return {
-            "hdd": float(hdd),
-            "yagis_mm": float(yagis),
-            "gunes_kwh_m2": float(gunes_kwh_m2),
-            "is_real": True
-        }
+        return {"hdd": float(hdd), "yagis_mm": float(yagis), "gunes_kwh_m2": float(gunes_kwh_m2), "is_real": True}
     except:
         return safe
 
-# ----------------------------
-# Konum -> İl (Nominatim)
-# ----------------------------
+
+# --- Reverse geocode -> province ---
 def reverse_geocode_province(lat: float, lng: float) -> Optional[str]:
     try:
         url = "https://nominatim.openstreetmap.org/reverse"
@@ -219,7 +177,6 @@ def reverse_geocode_province(lat: float, lng: float) -> Optional[str]:
             return None
         j = r.json()
         addr = j.get("address", {})
-        # province/state/county farklı gelebilir
         cand = addr.get("province") or addr.get("state") or addr.get("county")
         if not cand:
             return None
@@ -229,17 +186,14 @@ def reverse_geocode_province(lat: float, lng: float) -> Optional[str]:
 
 def degree_day_zone_from_province(prov: Optional[str]) -> int:
     if not prov:
-        return 3  # fallback
-    # küçük normalizasyon
-    prov = prov.replace("ŞANLIURFA", "ŞANLIURFA")
+        return 3
     for zone, provs in DG_ZONE_PROVINCES.items():
         if prov in provs:
             return zone
     return 3
 
-# ----------------------------
-# Enerji (basitleştirilmiş)
-# ----------------------------
+
+# --- Enerji ---
 def annual_energy_from_U(data: BuildingData, hdd: float, u_wall: float, u_win: float) -> Dict[str, float]:
     duvar, cam, _ = geometry(data)
     enerji_kwh = ((u_wall * duvar) + (u_win * cam)) * hdd * 24.0 / 1000.0
@@ -250,7 +204,7 @@ def annual_energy_from_U(data: BuildingData, hdd: float, u_wall: float, u_win: f
     return {"enerji_kwh": enerji_kwh, "gaz_m3": gaz_m3, "tutar_tl": tutar, "co2_kg": co2}
 
 def investment_insulation(duvar_alan: float, kal_cm: int, mat: dict) -> Dict[str, float]:
-    vol = duvar_alan * (kal_cm / 100.0)  # m3
+    vol = duvar_alan * (kal_cm / 100.0)
     cost = vol * mat["fiyat_m3"]
     emb = vol * mat["karbon_m3"]
     return {"vol_m3": vol, "cost_tl": cost, "emb_kg": emb}
@@ -260,35 +214,34 @@ def investment_window(cam_alan: float, win: dict) -> Dict[str, float]:
     emb = cam_alan * win.get("karbon_m2", 0.0)
     return {"cost_tl": cost, "emb_kg": emb}
 
+
 @app.post("/analyze")
 async def analyze_building(data: BuildingData):
     try:
-        # 1) TS825 derece gün bölgesi (il -> bölge)
+        # TS825 Bölge
         prov = reverse_geocode_province(data.lat, data.lng)
         zone = degree_day_zone_from_province(prov)
         u_wall_max = TS825_UWALL_MAX[zone]
 
-        # 2) İklim (Bugün için “2020”, gelecek için “2050”)
+        # İklim (today=2020, future=2050)
         clim_now = climate_year(data.lat, data.lng, 2020, data.senaryo)
         clim_2050 = climate_year(data.lat, data.lng, 2050, data.senaryo)
 
-        # 3) Geometri
-        duvar, cam, cati = geometry(data)
+        # Geometri
+        duvar, cam, _ = geometry(data)
 
-        # 4) Pencere
+        # Pencere (mevcut)
         win_mevcut = MALZEME_DB["pencereler"].get(data.mevcut_pencere, MALZEME_DB["pencereler"]["Çift Cam (Isıcam S)"])
         u_win_mevcut = float(win_mevcut["u"])
 
-        # 5) TS825 baz (duvar U_max şartını sağlayacak kalınlık)
-        # TS825 Rsi/Rse: dış duvar için Çizelge 2 → Rsi=0.13, Rse=0.04
+        # TS825 yüzey dirençleri (Çizelge 2 - yaygın kullanım)
         Rsi, Rse = 0.13, 0.04
 
-        # TS825 baz için: DB’deki yalıtımlar arasından "TS825 U_max" şartını sağlayan
-        # en düşük yatırım maliyetli olanı seçiyoruz.
+        # --- TS825 Baz: Umax şartını sağlayan en düşük yatırım maliyetli yalıtımı seç ---
         best_ts = None
         best_ts_cost = 1e30
 
-        for name, mat in MALZEME_DB["yalitimlar"].items():
+        for y_name, mat in MALZEME_DB["yalitimlar"].items():
             kal_cm = ts825_required_insulation_thickness_cm(
                 U_target=u_wall_max,
                 lambda_ins=mat["lambda"],
@@ -296,19 +249,20 @@ async def analyze_building(data: BuildingData):
                 Rse=Rse,
                 R_base_layers=float(data.r_base_layers)
             )
-
-            # U duvar (TS825 formülü)
             R_total = Rsi + float(data.r_base_layers) + (kal_cm / 100.0) / max(1e-9, mat["lambda"]) + Rse
             u_wall = ts825_u_from_R(R_total)
 
             inv = investment_insulation(duvar, kal_cm, mat)
             if inv["cost_tl"] < best_ts_cost:
                 best_ts_cost = inv["cost_tl"]
-                best_ts = {"yalitim": name, "kalinlik_cm": kal_cm, "u_wall": u_wall, "yatirim_tl": inv["cost_tl"], "embodied_kg": inv["emb_kg"]}
+                best_ts = {
+                    "yalitim": y_name,
+                    "kalinlik_cm": int(kal_cm),
+                    "u_wall": float(u_wall),
+                }
 
-        # TS825 baz enerji (bugün iklimi)
+        # TS825 baz enerji (2020/2050)
         base_now = annual_energy_from_U(data, clim_now["hdd"], best_ts["u_wall"], u_win_mevcut)
-        # 2050 ikliminde aynı baz yapının tüketimi (gelecek riski göstermek için)
         base_2050 = annual_energy_from_U(data, clim_2050["hdd"], best_ts["u_wall"], u_win_mevcut)
 
         mevcut = {
@@ -323,19 +277,63 @@ async def analyze_building(data: BuildingData):
                 "hdd": int(round(clim_now["hdd"])),
                 "yillik_gaz_m3": int(round(base_now["gaz_m3"])),
                 "yillik_tutar_tl": int(round(base_now["tutar_tl"])),
-                "yillik_co2_kg": int(round(base_now["co2_kg"]))
+                "yillik_co2_kg": int(round(base_now["co2_kg"])),
             },
             "y2050": {
                 "hdd": int(round(clim_2050["hdd"])),
                 "yillik_gaz_m3": int(round(base_2050["gaz_m3"])),
                 "yillik_tutar_tl": int(round(base_2050["tutar_tl"])),
-                "yillik_co2_kg": int(round(base_2050["co2_kg"]))
-            }
+                "yillik_co2_kg": int(round(base_2050["co2_kg"])),
+            },
         }
 
-        # 6) AI önerisi: TS825'yi karşılayan + 2050 ikliminde en iyi (pb_eco + pb_carb)
-        best_ai = None
-        best_score = 1e30
+        # --- AI tarama: 2 aday tut (10 yıl altı + genel) ---
+        best_under_10 = None
+        best_under_10_score = 1e30
+        best_any = None
+        best_any_score = 1e30
+
+        def build_candidate(y_name, mat, kal_cm, u_wall, p_name, win) -> Dict[str, Any]:
+            u_win = float(win["u"])
+
+            ai_2050 = annual_energy_from_U(data, clim_2050["hdd"], u_wall, u_win)
+
+            tasarruf_tl = base_2050["tutar_tl"] - ai_2050["tutar_tl"]
+            tasarruf_co2 = base_2050["co2_kg"] - ai_2050["co2_kg"]
+            tasarruf_gaz = base_2050["gaz_m3"] - ai_2050["gaz_m3"]
+
+            inv_ins = investment_insulation(duvar, kal_cm, mat)
+            inv_win = investment_window(cam, win)
+            yatirim = inv_ins["cost_tl"] + inv_win["cost_tl"]
+            embodied = inv_ins["emb_kg"] + inv_win["emb_kg"]
+
+            pb_eco = (yatirim / tasarruf_tl) if tasarruf_tl > 0 else 99.0
+            pb_carb = (embodied / tasarruf_co2) if tasarruf_co2 > 0 else 99.0
+
+            return {
+                "yalitim": y_name,
+                "kalinlik_cm": int(kal_cm),
+                "u_wall": round(u_wall, 3),
+                "pencere": p_name,
+                "u_pencere": round(u_win, 2),
+                "y2050": {
+                    "yillik_gaz_m3": int(round(ai_2050["gaz_m3"])),
+                    "yillik_tutar_tl": int(round(ai_2050["tutar_tl"])),
+                    "yillik_co2_kg": int(round(ai_2050["co2_kg"])),
+                },
+                "tasarruf": {
+                    "yillik_tasarruf_tl": int(round(tasarruf_tl)),
+                    "yillik_gaz_tasarruf_m3": int(round(tasarruf_gaz)),
+                    "yillik_co2_tasarruf_kg": int(round(tasarruf_co2)),
+                },
+                "yatirim": {
+                    "yatirim_tl": int(round(yatirim)),
+                    "embodied_co2_kg": int(round(embodied)),
+                },
+                "pb_eco_yil": round(pb_eco, 1),
+                "pb_carb_yil": round(pb_carb, 1),
+                "max_pb_eco_yil": MAX_PB_ECO_YIL
+            }
 
         for y_name, mat in MALZEME_DB["yalitimlar"].items():
             kal_cm = ts825_required_insulation_thickness_cm(
@@ -349,56 +347,110 @@ async def analyze_building(data: BuildingData):
             u_wall = ts825_u_from_R(R_total)
 
             for p_name, win in MALZEME_DB["pencereler"].items():
+                cand = build_candidate(y_name, mat, kal_cm, u_wall, p_name, win)
+                score = float(cand["pb_eco_yil"]) + float(cand["pb_carb_yil"])
+
+                if score < best_any_score:
+                    best_any_score = score
+                    best_any = cand
+
+                if cand["pb_eco_yil"] <= MAX_PB_ECO_YIL and score < best_under_10_score:
+                    best_under_10_score = score
+                    best_under_10 = cand
+
+        best_ai = best_under_10 if best_under_10 else best_any
+
+        # --- Alternatif öneri: eğer 10 yıl altı bulunamadıysa ---
+        alternatif = None
+        uyari = None
+
+        if best_under_10 is None:
+            uyari = f"Ekonomik geri ödeme hedefi (≤{MAX_PB_ECO_YIL} yıl) için uygun kombinasyon bulunamadı. Alternatif yöntem öneriliyor."
+
+            # A) sadece pencere yükseltmesi (TS825 baz yalıtım sabit)
+            best_win = None
+            best_win_pb = 1e30
+            for p_name, win in MALZEME_DB["pencereler"].items():
                 u_win = float(win["u"])
-
-                # 2050’de performans
-                ai_2050 = annual_energy_from_U(data, clim_2050["hdd"], u_wall, u_win)
-
-                # TS825 bazın 2050 gideri ile karşılaştır
+                ai_2050 = annual_energy_from_U(data, clim_2050["hdd"], best_ts["u_wall"], u_win)
                 tasarruf_tl = base_2050["tutar_tl"] - ai_2050["tutar_tl"]
                 tasarruf_co2 = base_2050["co2_kg"] - ai_2050["co2_kg"]
 
-                inv_ins = investment_insulation(duvar, kal_cm, mat)
                 inv_win = investment_window(cam, win)
-                yatirim = inv_ins["cost_tl"] + inv_win["cost_tl"]
-                embodied = inv_ins["emb_kg"] + inv_win["emb_kg"]
+                yatirim = inv_win["cost_tl"]
+                embodied = inv_win["emb_kg"]
 
                 pb_eco = (yatirim / tasarruf_tl) if tasarruf_tl > 0 else 99.0
                 pb_carb = (embodied / tasarruf_co2) if tasarruf_co2 > 0 else 99.0
 
-                score = pb_eco + pb_carb
-                if score < best_score:
-                    best_score = score
-                    best_ai = {
-                        "yalitim": y_name,
-                        "kalinlik_cm": int(kal_cm),
-                        "u_wall": round(u_wall, 3),
+                if pb_eco < best_win_pb:
+                    best_win_pb = pb_eco
+                    best_win = {
+                        "tip": "Sadece Pencere Yükseltmesi",
+                        "yalitim": best_ts["yalitim"],
+                        "kalinlik_cm": best_ts["kalinlik_cm"],
                         "pencere": p_name,
-                        "u_pencere": round(u_win, 2),
-                        "y2050": {
-                            "yillik_gaz_m3": int(round(ai_2050["gaz_m3"])),
-                            "yillik_tutar_tl": int(round(ai_2050["tutar_tl"])),
-                            "yillik_co2_kg": int(round(ai_2050["co2_kg"]))
-                        },
-                        "tasarruf": {
-                            "yillik_tasarruf_tl": int(round(tasarruf_tl)),
-                            "yillik_gaz_tasarruf_m3": int(round(base_2050["gaz_m3"] - ai_2050["gaz_m3"])),
-                            "yillik_co2_tasarruf_kg": int(round(tasarruf_co2))
-                        },
-                        "yatirim": {
-                            "yatirim_tl": int(round(yatirim)),
-                            "embodied_co2_kg": int(round(embodied))
-                        },
                         "pb_eco_yil": round(pb_eco, 1),
                         "pb_carb_yil": round(pb_carb, 1),
+                        "yatirim_tl": int(round(yatirim)),
+                        "embodied_co2_kg": int(round(embodied)),
+                        "yillik_tasarruf_tl": int(round(tasarruf_tl)),
                     }
 
-        # 7) Kaynak hasadı (2050 yağış & güneş)
+            # B) sadece yalıtım (mevcut pencere sabit)
+            best_ins = None
+            best_ins_pb = 1e30
+            for y_name, mat in MALZEME_DB["yalitimlar"].items():
+                kal_cm = ts825_required_insulation_thickness_cm(
+                    U_target=u_wall_max,
+                    lambda_ins=mat["lambda"],
+                    Rsi=Rsi,
+                    Rse=Rse,
+                    R_base_layers=float(data.r_base_layers)
+                )
+                R_total = Rsi + float(data.r_base_layers) + (kal_cm / 100.0) / max(1e-9, mat["lambda"]) + Rse
+                u_wall = ts825_u_from_R(R_total)
+
+                ai_2050 = annual_energy_from_U(data, clim_2050["hdd"], u_wall, u_win_mevcut)
+                tasarruf_tl = base_2050["tutar_tl"] - ai_2050["tutar_tl"]
+                tasarruf_co2 = base_2050["co2_kg"] - ai_2050["co2_kg"]
+
+                inv_ins = investment_insulation(duvar, kal_cm, mat)
+                yatirim = inv_ins["cost_tl"]
+                embodied = inv_ins["emb_kg"]
+
+                pb_eco = (yatirim / tasarruf_tl) if tasarruf_tl > 0 else 99.0
+                pb_carb = (embodied / tasarruf_co2) if tasarruf_co2 > 0 else 99.0
+
+                if pb_eco < best_ins_pb:
+                    best_ins_pb = pb_eco
+                    best_ins = {
+                        "tip": "Sadece Yalıtım Optimizasyonu",
+                        "yalitim": y_name,
+                        "kalinlik_cm": int(kal_cm),
+                        "pencere": data.mevcut_pencere,
+                        "pb_eco_yil": round(pb_eco, 1),
+                        "pb_carb_yil": round(pb_carb, 1),
+                        "yatirim_tl": int(round(yatirim)),
+                        "embodied_co2_kg": int(round(embodied)),
+                        "yillik_tasarruf_tl": int(round(tasarruf_tl)),
+                    }
+
+            candidates = [c for c in [best_win, best_ins] if c is not None]
+            under10 = [c for c in candidates if c["pb_eco_yil"] <= MAX_PB_ECO_YIL]
+            if under10:
+                alternatif = min(under10, key=lambda x: x["pb_eco_yil"])
+            elif candidates:
+                alternatif = min(candidates, key=lambda x: x["pb_eco_yil"])
+
+        # Su & PV (2050)
         su_m3 = data.taban_alani * (clim_2050["yagis_mm"] / 1000.0) * data.su_verimi
         pv_kwh = (data.taban_alani * data.cati_orani) * clim_2050["gunes_kwh_m2"] * data.pv_verim
 
         best_ai["su_hasadi_m3_yil"] = round(su_m3, 1)
         best_ai["pv_kwh_yil"] = int(round(pv_kwh))
+        best_ai["uyari"] = uyari
+        best_ai["alternatif_oneri"] = alternatif
 
         return {
             "iklim_info": {
@@ -407,7 +459,7 @@ async def analyze_building(data: BuildingData):
                     "hdd": int(round(clim_2050["hdd"])),
                     "yagis_mm": int(round(clim_2050["yagis_mm"])),
                     "gunes_kwh_m2": int(round(clim_2050["gunes_kwh_m2"])),
-                    "is_real": bool(clim_2050["is_real"])
+                    "is_real": bool(clim_2050["is_real"]),
                 }
             },
             "mevcut": mevcut,
