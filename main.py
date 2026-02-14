@@ -4,9 +4,10 @@ import requests
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional, Dict, Any
+from typing import Dict, Any, Optional
 
-app = FastAPI(title="Geleceğin Mimarı AI Engine - TS825 + ROI10")
+
+app = FastAPI(title="ChronoBuild AI Engine (WP Catalog + TS825 + ROI10)")
 
 app.add_middleware(
     CORSMiddleware,
@@ -15,26 +16,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MAX_PB_ECO_YIL = 10.0  # ekonomik geri ödeme üst sınır
+MAX_PB_ECO_YIL = 10.0
 
-MALZEME_DB = {
-    "yalitimlar": {
-        "Taş Yünü (Sert)": {"lambda": 0.035, "karbon_m3": 150, "fiyat_m3": 2800},
-        "Cam Yünü":        {"lambda": 0.040, "karbon_m3": 110, "fiyat_m3": 2100},
-        "XPS Köpük":       {"lambda": 0.030, "karbon_m3": 280, "fiyat_m3": 3500},
-        "EPS Köpük (Gri)": {"lambda": 0.032, "karbon_m3": 90,  "fiyat_m3": 1800}
-    },
-    "pencereler": {
-        "Tek Cam (Standart)":  {"u": 5.7, "karbon_m2": 15, "fiyat_m2": 1500},
-        "Çift Cam (Isıcam S)": {"u": 2.8, "karbon_m2": 25, "fiyat_m2": 3200},
-        "Üçlü Cam (Isıcam K)": {"u": 1.1, "karbon_m2": 40, "fiyat_m2": 5500},
-    }
-}
+WP_CATALOG_URL = os.environ.get("WP_CATALOG_URL", "").strip()
+WP_API_KEY = os.environ.get("WP_API_KEY", "").strip()
+NOMINATIM_EMAIL = os.environ.get("NOMINATIM_EMAIL", "").strip()
 
-# TS825 Ek A.2 (Duvar Umax tavsiye değerleri)
+# TS825 Ek A.2 (Duvar Umax - derece gün bölgesine göre)
 TS825_UWALL_MAX = {1: 0.45, 2: 0.40, 3: 0.40, 4: 0.35, 5: 0.25, 6: 0.25}
 
-# TS825 Ek D iller -> derece-gün bölgeleri (özet; ihtiyaç oldukça genişletilebilir)
+# TS825 Ek D - iller -> derece-gün bölgeleri (özet; genişletilebilir)
 DG_ZONE_PROVINCES = {
     1: {"ADANA", "ANTALYA", "MERSİN"},
     2: {"ADIYAMAN", "AYDIN", "BATMAN", "DENİZLİ", "GAZİANTEP", "HATAY", "İZMIR", "KAHRAMANMARAŞ",
@@ -50,26 +41,28 @@ DG_ZONE_PROVINCES = {
     6: {"AĞRI", "ARDAHAN", "ERZURUM", "KARS"},
 }
 
+
 class BuildingData(BaseModel):
     lat: float
     lng: float
     taban_alani: float
     kat_sayisi: int
     kat_yuksekligi: float
-    dogalgaz_fiyat: float  # TL/m3
+    dogalgaz_fiyat: float = 0.0  # kullanıcı girerse öncelik verilecek (istersen 0 bırak)
     yonelim: int = 180
     senaryo: str
     mevcut_pencere: str
 
-    # opsiyoneller
+    # opsiyonel ayarlar
     pencere_orani: float = 0.15
     cati_orani: float = 0.5
     su_verimi: float = 0.9
     pv_verim: float = 0.22
 
-    baz_ic_sicaklik: float = 19.0
-    r_base_layers: float = 0.50  # yalıtım hariç baz duvar R toplamı (sistem varsayımı)
+    # TS825 hesap varsayımları
+    r_base_layers: float = 0.50  # yalıtım harici duvar R toplamı
 
+    # Doğalgaz katsayıları
     gaz_kwh_m3: float = 10.64
     gaz_co2_kg_m3: float = 2.15
 
@@ -77,20 +70,66 @@ class BuildingData(BaseModel):
         extra = "ignore"
 
 
-# --- TS825 mantolama (formül) ---
+# ---------------- WP CATALOG ----------------
+def fetch_wp_catalog() -> Dict[str, Any]:
+    if not WP_CATALOG_URL:
+        raise RuntimeError("WP_CATALOG_URL env yok. Cloud Run env'e ekleyin.")
+
+    headers = {"X-CHRONO-KEY": WP_API_KEY} if WP_API_KEY else {}
+    r = requests.get(WP_CATALOG_URL, headers=headers, timeout=10)
+    if r.status_code != 200:
+        raise RuntimeError(f"WP catalog HTTP {r.status_code}")
+
+    data = r.json()
+    if "yalitimlar" not in data or "pencereler" not in data:
+        raise RuntimeError("WP catalog formatı hatalı (yalitimlar/pencereler yok).")
+
+    yal = {}
+    for x in data.get("yalitimlar", []):
+        if x.get("active", True) and x.get("name") and x.get("lambda") and x.get("fiyat_m3") is not None and x.get("karbon_m3") is not None:
+            yal[str(x["name"])] = {
+                "lambda": float(x["lambda"]),
+                "fiyat_m3": float(x["fiyat_m3"]),
+                "karbon_m3": float(x["karbon_m3"]),
+            }
+
+    pen = {}
+    for x in data.get("pencereler", []):
+        if x.get("active", True) and x.get("name") and x.get("u") is not None:
+            pen[str(x["name"])] = {
+                "u": float(x["u"]),
+                "fiyat_m2": float(x.get("fiyat_m2", 0.0)),
+                "karbon_m2": float(x.get("karbon_m2", 0.0)),
+            }
+
+    tarifeler = data.get("tarifeler", {}) or {}
+    config = data.get("config", {}) or {}
+
+    if not yal:
+        raise RuntimeError("WP catalog: aktif yalıtım bulunamadı.")
+    if not pen:
+        raise RuntimeError("WP catalog: aktif pencere bulunamadı.")
+
+    return {"yalitimlar": yal, "pencereler": pen, "tarifeler": tarifeler, "config": config}
+
+
+# ---------------- TS825 mantolama formülleri ----------------
 def ts825_u_from_R(R_total: float) -> float:
     return 1.0 / max(1e-9, R_total)
 
-def ts825_required_insulation_thickness_cm(U_target: float, lambda_ins: float, Rsi: float, Rse: float, R_base_layers: float) -> int:
-    needed = (1.0 / max(1e-9, U_target)) - (Rsi + R_base_layers + Rse)
-    d_m = max(0.0, needed) * lambda_ins
+def ts825_required_insulation_thickness_cm(
+    U_target: float, lambda_ins: float, Rsi: float, Rse: float, R_base_layers: float
+) -> int:
+    # 1/U = Rsi + R_base + R_ins + Rse  =>  R_ins = 1/U - (Rsi+R_base+Rse)
+    needed_R_ins = (1.0 / max(1e-9, U_target)) - (Rsi + R_base_layers + Rse)
+    d_m = max(0.0, needed_R_ins) * lambda_ins
     cm = int(math.ceil(d_m * 100))
     if cm % 2 != 0:
         cm += 1
     return max(0, cm)
 
 
-# --- Geometri ---
+# ---------------- Geometri ----------------
 def geometry(data: BuildingData):
     kenar = math.sqrt(max(1e-6, data.taban_alani))
     cevre = 4 * kenar
@@ -101,15 +140,14 @@ def geometry(data: BuildingData):
     return duvar, cam, cati
 
 
-# --- HDD ---
+# ---------------- Climate (Open-Meteo) ----------------
 def calculate_hdd(temps, base=19.0):
     return sum(max(0.0, base - t) for t in temps if t is not None)
 
-
-# --- Open-Meteo climate ---
 def climate_year(lat: float, lng: float, year: int, scenario: str) -> Dict[str, Any]:
     climate_url = "https://climate-api.open-meteo.com/v1/climate"
 
+    # basit senaryo düzeltmeleri (API senaryo parametresi yoksa bile “oynatmak” için)
     if scenario == "ssp126":
         temp_adj, precip_adj = -0.3, 1.05
     elif scenario == "ssp585":
@@ -124,13 +162,13 @@ def climate_year(lat: float, lng: float, year: int, scenario: str) -> Dict[str, 
         "end_date": f"{year}-12-31",
         "models": "EC_Earth3P_HR",
         "daily": ["temperature_2m_mean", "precipitation_sum", "shortwave_radiation_sum"],
-        "disable_bias_correction": "true"
+        "disable_bias_correction": "true",
     }
 
     safe = {"hdd": 2200.0, "yagis_mm": 450.0, "gunes_kwh_m2": 1550.0, "is_real": False}
 
     try:
-        r = requests.get(climate_url, params=params, timeout=8)
+        r = requests.get(climate_url, params=params, timeout=10)
         if r.status_code != 200:
             return safe
         j = r.json()
@@ -140,7 +178,7 @@ def climate_year(lat: float, lng: float, year: int, scenario: str) -> Dict[str, 
         ts = j["daily"].get("temperature_2m_mean", []) or []
         ps = j["daily"].get("precipitation_sum", []) or []
         ss = j["daily"].get("shortwave_radiation_sum", []) or []
-        units = (j.get("daily_units") or {})
+        units = j.get("daily_units", {}) or {}
 
         temps = [(t + temp_adj) for t in ts if t is not None]
         if len(temps) < 50:
@@ -166,17 +204,18 @@ def climate_year(lat: float, lng: float, year: int, scenario: str) -> Dict[str, 
         return safe
 
 
-# --- Reverse geocode -> province ---
+# ---------------- Province / TS825 zone ----------------
 def reverse_geocode_province(lat: float, lng: float) -> Optional[str]:
     try:
         url = "https://nominatim.openstreetmap.org/reverse"
         params = {"format": "jsonv2", "lat": lat, "lon": lng, "zoom": 10, "addressdetails": 1}
-        headers = {"User-Agent": "GeleceginMimari/1.0 (educational project)"}
-        r = requests.get(url, params=params, headers=headers, timeout=6)
+        ua = f"ChronoBuild/1.0 ({NOMINATIM_EMAIL})" if NOMINATIM_EMAIL else "ChronoBuild/1.0 (educational)"
+        headers = {"User-Agent": ua}
+        r = requests.get(url, params=params, headers=headers, timeout=8)
         if r.status_code != 200:
             return None
         j = r.json()
-        addr = j.get("address", {})
+        addr = j.get("address", {}) or {}
         cand = addr.get("province") or addr.get("state") or addr.get("county")
         if not cand:
             return None
@@ -193,7 +232,7 @@ def degree_day_zone_from_province(prov: Optional[str]) -> int:
     return 3
 
 
-# --- Enerji ---
+# ---------------- Energy + investment ----------------
 def annual_energy_from_U(data: BuildingData, hdd: float, u_wall: float, u_win: float) -> Dict[str, float]:
     duvar, cam, _ = geometry(data)
     enerji_kwh = ((u_wall * duvar) + (u_win * cam)) * hdd * 24.0 / 1000.0
@@ -210,69 +249,90 @@ def investment_insulation(duvar_alan: float, kal_cm: int, mat: dict) -> Dict[str
     return {"vol_m3": vol, "cost_tl": cost, "emb_kg": emb}
 
 def investment_window(cam_alan: float, win: dict) -> Dict[str, float]:
-    cost = cam_alan * win.get("fiyat_m2", 0.0)
-    emb = cam_alan * win.get("karbon_m2", 0.0)
+    cost = cam_alan * float(win.get("fiyat_m2", 0.0))
+    emb = cam_alan * float(win.get("karbon_m2", 0.0))
     return {"cost_tl": cost, "emb_kg": emb}
 
 
 @app.post("/analyze")
 async def analyze_building(data: BuildingData):
     try:
-        # TS825 Bölge
+        catalog = fetch_wp_catalog()
+        cfg = catalog.get("config", {}) or {}
+        tarifeler = catalog.get("tarifeler", {}) or {}
+
+        # config override (WP’den)
+        data.pv_verim = float(cfg.get("pv_verim", data.pv_verim))
+        data.su_verimi = float(cfg.get("su_verimi", data.su_verimi))
+        data.cati_orani = float(cfg.get("cati_orani", data.cati_orani))
+
+        # il & TS825 zone
         prov = reverse_geocode_province(data.lat, data.lng)
         zone = degree_day_zone_from_province(prov)
         u_wall_max = TS825_UWALL_MAX[zone]
 
-        # İklim (today=2020, future=2050)
+        # gaz fiyatı (WP -> il bazlı -> default) / kullanıcı girişi varsa üstün
+        default_gas = float(tarifeler.get("default_gas_tl_m3", 6.0))
+        by_prov = tarifeler.get("by_province", {}) or {}
+        wp_gas = default_gas
+        if prov and prov in by_prov:
+            try:
+                wp_gas = float(by_prov[prov])
+            except:
+                wp_gas = default_gas
+        if data.dogalgaz_fiyat and data.dogalgaz_fiyat > 0:
+            pass  # kullanıcı üstün
+        else:
+            data.dogalgaz_fiyat = wp_gas
+
+        # iklim
         clim_now = climate_year(data.lat, data.lng, 2020, data.senaryo)
         clim_2050 = climate_year(data.lat, data.lng, 2050, data.senaryo)
 
-        # Geometri
+        # geometri
         duvar, cam, _ = geometry(data)
 
-        # Pencere (mevcut)
-        win_mevcut = MALZEME_DB["pencereler"].get(data.mevcut_pencere, MALZEME_DB["pencereler"]["Çift Cam (Isıcam S)"])
+        # pencere (mevcut)
+        p_db = catalog["pencereler"]
+        win_mevcut = p_db.get(data.mevcut_pencere) or p_db.get("Çift Cam (Isıcam S)") or next(iter(p_db.values()))
         u_win_mevcut = float(win_mevcut["u"])
 
-        # TS825 yüzey dirençleri (Çizelge 2 - yaygın kullanım)
+        # TS825 yüzey dirençleri (standart kullanım)
         Rsi, Rse = 0.13, 0.04
 
-        # --- TS825 Baz: Umax şartını sağlayan en düşük yatırım maliyetli yalıtımı seç ---
+        # --- TS825 Baz: Umax sağlayan en düşük yatırım maliyetli yalıtımı seç ---
+        y_db = catalog["yalitimlar"]
         best_ts = None
         best_ts_cost = 1e30
 
-        for y_name, mat in MALZEME_DB["yalitimlar"].items():
+        for y_name, mat in y_db.items():
             kal_cm = ts825_required_insulation_thickness_cm(
                 U_target=u_wall_max,
-                lambda_ins=mat["lambda"],
+                lambda_ins=float(mat["lambda"]),
                 Rsi=Rsi,
                 Rse=Rse,
-                R_base_layers=float(data.r_base_layers)
+                R_base_layers=float(data.r_base_layers),
             )
-            R_total = Rsi + float(data.r_base_layers) + (kal_cm / 100.0) / max(1e-9, mat["lambda"]) + Rse
+            R_total = Rsi + float(data.r_base_layers) + (kal_cm / 100.0) / max(1e-9, float(mat["lambda"])) + Rse
             u_wall = ts825_u_from_R(R_total)
 
             inv = investment_insulation(duvar, kal_cm, mat)
             if inv["cost_tl"] < best_ts_cost:
                 best_ts_cost = inv["cost_tl"]
-                best_ts = {
-                    "yalitim": y_name,
-                    "kalinlik_cm": int(kal_cm),
-                    "u_wall": float(u_wall),
-                }
+                best_ts = {"yalitim": y_name, "kalinlik_cm": int(kal_cm), "u_wall": float(u_wall)}
 
-        # TS825 baz enerji (2020/2050)
         base_now = annual_energy_from_U(data, clim_now["hdd"], best_ts["u_wall"], u_win_mevcut)
         base_2050 = annual_energy_from_U(data, clim_2050["hdd"], best_ts["u_wall"], u_win_mevcut)
 
         mevcut = {
-            "ts825_zone": zone,
             "province": prov or "Bilinmiyor",
+            "ts825_zone": zone,
             "u_wall_max": u_wall_max,
             "yalitim": best_ts["yalitim"],
             "kalinlik_cm": best_ts["kalinlik_cm"],
             "u_wall": round(best_ts["u_wall"], 3),
             "pencere": data.mevcut_pencere,
+            "gaz_fiyat_tl_m3": round(float(data.dogalgaz_fiyat), 3),
             "today": {
                 "hdd": int(round(clim_now["hdd"])),
                 "yillik_gaz_m3": int(round(base_now["gaz_m3"])),
@@ -287,7 +347,7 @@ async def analyze_building(data: BuildingData):
             },
         }
 
-        # --- AI tarama: 2 aday tut (10 yıl altı + genel) ---
+        # --- AI tarama: 10 yıl altını öncelikle seç ---
         best_under_10 = None
         best_under_10_score = 1e30
         best_any = None
@@ -295,7 +355,6 @@ async def analyze_building(data: BuildingData):
 
         def build_candidate(y_name, mat, kal_cm, u_wall, p_name, win) -> Dict[str, Any]:
             u_win = float(win["u"])
-
             ai_2050 = annual_energy_from_U(data, clim_2050["hdd"], u_wall, u_win)
 
             tasarruf_tl = base_2050["tutar_tl"] - ai_2050["tutar_tl"]
@@ -313,9 +372,9 @@ async def analyze_building(data: BuildingData):
             return {
                 "yalitim": y_name,
                 "kalinlik_cm": int(kal_cm),
-                "u_wall": round(u_wall, 3),
+                "u_wall": round(float(u_wall), 3),
                 "pencere": p_name,
-                "u_pencere": round(u_win, 2),
+                "u_pencere": round(float(u_win), 2),
                 "y2050": {
                     "yillik_gaz_m3": int(round(ai_2050["gaz_m3"])),
                     "yillik_tutar_tl": int(round(ai_2050["tutar_tl"])),
@@ -332,21 +391,21 @@ async def analyze_building(data: BuildingData):
                 },
                 "pb_eco_yil": round(pb_eco, 1),
                 "pb_carb_yil": round(pb_carb, 1),
-                "max_pb_eco_yil": MAX_PB_ECO_YIL
+                "max_pb_eco_yil": MAX_PB_ECO_YIL,
             }
 
-        for y_name, mat in MALZEME_DB["yalitimlar"].items():
+        for y_name, mat in y_db.items():
             kal_cm = ts825_required_insulation_thickness_cm(
                 U_target=u_wall_max,
-                lambda_ins=mat["lambda"],
+                lambda_ins=float(mat["lambda"]),
                 Rsi=Rsi,
                 Rse=Rse,
-                R_base_layers=float(data.r_base_layers)
+                R_base_layers=float(data.r_base_layers),
             )
-            R_total = Rsi + float(data.r_base_layers) + (kal_cm / 100.0) / max(1e-9, mat["lambda"]) + Rse
+            R_total = Rsi + float(data.r_base_layers) + (kal_cm / 100.0) / max(1e-9, float(mat["lambda"])) + Rse
             u_wall = ts825_u_from_R(R_total)
 
-            for p_name, win in MALZEME_DB["pencereler"].items():
+            for p_name, win in p_db.items():
                 cand = build_candidate(y_name, mat, kal_cm, u_wall, p_name, win)
                 score = float(cand["pb_eco_yil"]) + float(cand["pb_carb_yil"])
 
@@ -360,7 +419,7 @@ async def analyze_building(data: BuildingData):
 
         best_ai = best_under_10 if best_under_10 else best_any
 
-        # --- Alternatif öneri: eğer 10 yıl altı bulunamadıysa ---
+        # --- 10 yıl altı yoksa alternatif yöntem öner ---
         alternatif = None
         uyari = None
 
@@ -370,9 +429,10 @@ async def analyze_building(data: BuildingData):
             # A) sadece pencere yükseltmesi (TS825 baz yalıtım sabit)
             best_win = None
             best_win_pb = 1e30
-            for p_name, win in MALZEME_DB["pencereler"].items():
+            for p_name, win in p_db.items():
                 u_win = float(win["u"])
                 ai_2050 = annual_energy_from_U(data, clim_2050["hdd"], best_ts["u_wall"], u_win)
+
                 tasarruf_tl = base_2050["tutar_tl"] - ai_2050["tutar_tl"]
                 tasarruf_co2 = base_2050["co2_kg"] - ai_2050["co2_kg"]
 
@@ -400,18 +460,19 @@ async def analyze_building(data: BuildingData):
             # B) sadece yalıtım (mevcut pencere sabit)
             best_ins = None
             best_ins_pb = 1e30
-            for y_name, mat in MALZEME_DB["yalitimlar"].items():
+            for y_name, mat in y_db.items():
                 kal_cm = ts825_required_insulation_thickness_cm(
                     U_target=u_wall_max,
-                    lambda_ins=mat["lambda"],
+                    lambda_ins=float(mat["lambda"]),
                     Rsi=Rsi,
                     Rse=Rse,
-                    R_base_layers=float(data.r_base_layers)
+                    R_base_layers=float(data.r_base_layers),
                 )
-                R_total = Rsi + float(data.r_base_layers) + (kal_cm / 100.0) / max(1e-9, mat["lambda"]) + Rse
+                R_total = Rsi + float(data.r_base_layers) + (kal_cm / 100.0) / max(1e-9, float(mat["lambda"])) + Rse
                 u_wall = ts825_u_from_R(R_total)
 
                 ai_2050 = annual_energy_from_U(data, clim_2050["hdd"], u_wall, u_win_mevcut)
+
                 tasarruf_tl = base_2050["tutar_tl"] - ai_2050["tutar_tl"]
                 tasarruf_co2 = base_2050["co2_kg"] - ai_2050["co2_kg"]
 
@@ -454,16 +515,19 @@ async def analyze_building(data: BuildingData):
 
         return {
             "iklim_info": {
-                "today": {"hdd": int(round(clim_now["hdd"])), "yagis_mm": int(round(clim_now["yagis_mm"]))},
+                "today": {
+                    "hdd": int(round(clim_now["hdd"])),
+                    "yagis_mm": int(round(clim_now["yagis_mm"])),
+                },
                 "y2050": {
                     "hdd": int(round(clim_2050["hdd"])),
                     "yagis_mm": int(round(clim_2050["yagis_mm"])),
                     "gunes_kwh_m2": int(round(clim_2050["gunes_kwh_m2"])),
                     "is_real": bool(clim_2050["is_real"]),
-                }
+                },
             },
             "mevcut": mevcut,
-            "ai_onerisi": best_ai
+            "ai_onerisi": best_ai,
         }
 
     except Exception as e:
