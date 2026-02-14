@@ -1,18 +1,17 @@
-# Python İmajı
-FROM python:3.10-slim
+FROM python:3.11-slim
 
-# Çalışma dizini
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
-# Kütüphaneleri yükle
-COPY requirements.txt .
+COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Kodları kopyala
-COPY . .
+COPY . /app
 
-# Cloud Run için Port ayarı
-ENV PORT 8080
+# Cloud Run
+ENV PORT=8080
+EXPOSE 8080
 
-# Uygulamayı başlat (main:app)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT}"]
