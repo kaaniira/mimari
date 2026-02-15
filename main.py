@@ -577,25 +577,38 @@ def ts825_zone_for_province(province: Optional[str]) -> int:
 
 
 def fetch_openmeteo_2050(lat: float, lng: float, scenario: str, zone: int) -> Dict[str, float]:
-    url = "https://climate-api.open-meteo.com/v1/climate?" + urllib.parse.urlencode({
+    base_params = {
         "latitude": lat,
         "longitude": lng,
         "start_date": "2046-01-01",
         "end_date": "2055-12-31",
-        "models": "MRI_AGCM3_2_S",
         "daily": "temperature_2m_mean,precipitation_sum,shortwave_radiation_sum",
         "scenario": scenario,
-    })
-    req = urllib.request.Request(url, headers={"User-Agent": "chronobuild-climate/1.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=12) as r:
-            data = json.loads(r.read().decode("utf-8"))
+    }
+
+    # Open-Meteo tarafında model/parametre değişimlerine karşı birkaç kombinasyonu deneriz.
+    attempts = [
+        dict(base_params),
+        dict(base_params, models="MRI_AGCM3_2_S"),
+        dict(base_params, models="MRI_AGCM3-2-S"),
+        dict(base_params, start_date="2041-01-01", end_date="2050-12-31"),
+    ]
+
+    for params in attempts:
+        url = "https://climate-api.open-meteo.com/v1/climate?" + urllib.parse.urlencode(params)
+        req = urllib.request.Request(url, headers={"User-Agent": "chronobuild-climate/1.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=12) as r:
+                data = json.loads(r.read().decode("utf-8"))
+        except Exception:
+            continue
+
         daily = data.get("daily", {})
         temps = [float(x) for x in daily.get("temperature_2m_mean", []) if x is not None]
         rains = [float(x) for x in daily.get("precipitation_sum", []) if x is not None]
         suns = [float(x) for x in daily.get("shortwave_radiation_sum", []) if x is not None]
         if not temps:
-            raise ValueError("temperature data missing")
+            continue
 
         t_mean = sum(temps) / len(temps)
         yearly_rain = (sum(rains) / max(len(rains), 1)) * 365.0
@@ -609,16 +622,14 @@ def fetch_openmeteo_2050(lat: float, lng: float, scenario: str, zone: int) -> Di
             "temp_mean_c": round(t_mean, 2),
             "kaynak": "open-meteo",
         }
-    except Exception:
-        return {
-            "hdd": None,
-            "yagis_mm": None,
-            "gunes_kwh_m2": None,
-            "temp_mean_c": None,
-            "kaynak": "veri yok",
-        }
 
-
+    return {
+        "hdd": None,
+        "yagis_mm": None,
+        "gunes_kwh_m2": None,
+        "temp_mean_c": None,
+        "kaynak": "veri yok",
+    }
 
 
 def fetch_openmeteo_current(lat: float, lng: float, zone: int) -> Dict[str, float]:
