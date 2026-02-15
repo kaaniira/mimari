@@ -610,16 +610,12 @@ def fetch_openmeteo_2050(lat: float, lng: float, scenario: str, zone: int) -> Di
             "kaynak": "open-meteo",
         }
     except Exception:
-        base_hdd = {1: 1200.0, 2: 1900.0, 3: 2600.0, 4: 3400.0}.get(zone, 2600.0)
-        hdd_delta = {"ssp126": -120.0, "ssp245": -260.0, "ssp585": -420.0}.get(scenario, -260.0)
-        hdd = max(600.0, base_hdd + hdd_delta)
-        temp = 18.0 - hdd / 365.0
         return {
-            "hdd": round(hdd, 1),
-            "yagis_mm": 620.0,
-            "gunes_kwh_m2": 1550.0,
-            "temp_mean_c": round(temp, 2),
-            "kaynak": "fallback",
+            "hdd": None,
+            "yagis_mm": None,
+            "gunes_kwh_m2": None,
+            "temp_mean_c": None,
+            "kaynak": "veri yok",
         }
 
 
@@ -658,13 +654,12 @@ def fetch_openmeteo_current(lat: float, lng: float, zone: int) -> Dict[str, floa
             "kaynak": "open-meteo-archive",
         }
     except Exception:
-        base_hdd = {1: 1300.0, 2: 2000.0, 3: 2700.0, 4: 3500.0}.get(zone, 2700.0)
         return {
-            "hdd": round(base_hdd, 1),
-            "yagis_mm": 650.0,
-            "gunes_kwh_m2": 1500.0,
-            "temp_mean_c": round(18.0 - base_hdd / 365.0, 2),
-            "kaynak": "fallback-current",
+            "hdd": None,
+            "yagis_mm": None,
+            "gunes_kwh_m2": None,
+            "temp_mean_c": None,
+            "kaynak": "veri yok",
         }
 
 def round_up_5(cm: float) -> int:
@@ -797,6 +792,60 @@ def analyze(inp: AnalyzeInput):
     climate_current = fetch_openmeteo_current(inp.lat, inp.lng, zone)
     climate_2050 = fetch_openmeteo_2050(inp.lat, inp.lng, inp.senaryo, zone)
 
+    if climate_2050.get("hdd") is None:
+        return {
+            "mevcut": {
+                "province": province,
+                "ts825_zone": zone,
+                "u_wall_max": u_wall_max,
+                "yalitim": "veri yok",
+                "kalinlik_cm": None,
+                "pencere": win_current.get("name", "-"),
+                "y2050": {
+                    "yillik_gaz_m3": None,
+                    "yillik_tutar_tl": None,
+                    "yillik_co2_kg": None,
+                },
+            },
+            "ai_onerisi": {
+                "yalitim": "veri yok",
+                "kalinlik_cm": None,
+                "pencere": "veri yok",
+                "y2050": {
+                    "yillik_gaz_m3": None,
+                    "yillik_tutar_tl": None,
+                    "yillik_co2_kg": None,
+                },
+                "pb_eco_yil": None,
+                "pb_carb_yil": None,
+                "max_pb_eco_yil": 10,
+                "tasarruf": {
+                    "yillik_tasarruf_tl": None,
+                    "yillik_gaz_tasarruf_m3": None,
+                    "yillik_co2_tasarruf_kg": None,
+                },
+                "yatirim": {
+                    "yatirim_tl": None,
+                    "embodied_co2_kg": None,
+                },
+                "su_hasadi_m3_yil": None,
+                "pv_kwh_yil": None,
+                "uyari": "2050 iklim verisi alınamadı (veri yok).",
+                "alternatif_oneri": None,
+            },
+            "iklim_info": {
+                "senaryo": inp.senaryo,
+                "kaynak": {
+                    "current": climate_current.get("kaynak", "veri yok"),
+                    "y2050": climate_2050.get("kaynak", "veri yok"),
+                },
+                "current": climate_current,
+                "guncel": climate_current,
+                "y2050": climate_2050,
+            },
+            "ai_notu": "API veri sağlayamadığı alanlarda değerler 'veri yok' olarak döndürüldü.",
+        }
+
     metrics = calc_building_metrics(inp.taban_alani, inp.kat_sayisi, inp.kat_yuksekligi)
     roof_area_eff = metrics["roof_area_m2"] * float(cfg.get("roof_ratio", 0.50))
 
@@ -884,8 +933,8 @@ def analyze(inp: AnalyzeInput):
         "iklim_info": {
             "senaryo": inp.senaryo,
             "kaynak": {
-                "current": climate_current.get("kaynak", "fallback-current"),
-                "y2050": climate_2050.get("kaynak", "fallback"),
+                "current": climate_current.get("kaynak", "veri yok"),
+                "y2050": climate_2050.get("kaynak", "veri yok"),
             },
             "current": {
                 "hdd": climate_current["hdd"],
