@@ -11,6 +11,7 @@ from typing import Dict, Any, Optional, List
 from fastapi import FastAPI, HTTPException, Request, Depends, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from google.cloud import firestore
@@ -31,7 +32,25 @@ if not ADMIN_SECRET:
     print("WARNING: ADMIN_SECRET is empty (set it in Cloud Run env).")
 
 app = FastAPI(title="ChronoBuild Engine + Admin Login (Firestore)")
-@@ -34,50 +37,53 @@ app.add_middleware(
+
+
+DEFAULT_CONFIG = {
+    "default_gas_tl_m3": 6.0,
+    "pv_eff": 0.22,
+    "rain_eff": 0.90,
+    "roof_ratio": 0.50,
+}
+
+DEFAULT_WINDOW = {
+    "name": "Çift Cam (Isıcam S)",
+    "u_value": 2.8,
+    "price_m2": 3200,
+    "carbon_m2": 25,
+    "active": True,
+}
+
+app.add_middleware(
+    CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
@@ -85,7 +104,74 @@ def ensure_defaults_once():
     if not list(_col("insulations").limit(1).stream()):
         set_doc("insulations", "tas_yunu", {
             "name": "Taş Yünü (Sert)",
-@@ -196,71 +202,184 @@ LOGIN_HTML = """
+@@ -93,50 +115,66 @@ def ensure_defaults_once():
+            "u_value": 2.8,
+            "price_m2": 3200,
+            "carbon_m2": 25,
+            "active": True
+        })
+
+def load_catalog() -> Dict[str, Any]:
+    ensure_defaults_once()
+
+    cfg = get_config()
+    ins = [x for x in get_all("insulations") if x.get("active", True)]
+    win = [x for x in get_all("windows") if x.get("active", True)]
+    gas = [x for x in get_all("gas_tariffs") if x.get("active", True)]
+
+    ins_map = {x["name"]: x for x in ins if x.get("name") and x.get("lambda_value")}
+    win_map = {x["name"]: x for x in win if x.get("name") and x.get("u_value")}
+    gas_map = {str(x.get("province", "")).strip().upper(): float(x.get("price_tl_m3", 0)) for x in gas}
+
+    return {
+        "config": cfg,
+        "insulations": ins_map,
+        "windows": win_map,
+        "gas_by_province": gas_map,
+    }
+
+
+def fallback_catalog() -> Dict[str, Any]:
+    return {
+        "config": dict(DEFAULT_CONFIG),
+        "insulations": {},
+        "windows": {DEFAULT_WINDOW["name"]: dict(DEFAULT_WINDOW)},
+        "gas_by_province": {},
+    }
+
+
+def require_firestore():
+    try:
+        _ = db()
+    except Exception as exc:
+        raise HTTPException(503, f"Firestore bağlantısı yok: {exc}")
+
+# -------------------- SESSION TOKEN (stdlib) --------------------
+def _b64u(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
+
+def _b64u_decode(s: str) -> bytes:
+    pad = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + pad)
+
+def sign_token(user: str, exp_ts: int) -> str:
+    """
+    token = base64url("user|exp|sighex")
+    sig = HMAC_SHA256(secret, "user|exp")
+    """
+    if not ADMIN_SECRET:
+        # SECRET yoksa güvenli değil; yine de çalışsın diye exception yerine engelleyelim:
+        raise HTTPException(500, "ADMIN_SECRET env eksik. Cloud Run env'e ekleyin.")
+    msg = f"{user}|{exp_ts}".encode("utf-8")
+    sig = hmac.new(ADMIN_SECRET.encode("utf-8"), msg, hashlib.sha256).hexdigest()
+    raw = f"{user}|{exp_ts}|{sig}".encode("utf-8")
+    return _b64u(raw)
+
+def verify_token(token: str) -> Optional[str]:
+    try:
+        raw = _b64u_decode(token).decode("utf-8")
+        parts = raw.split("|")
+@@ -196,178 +234,359 @@ LOGIN_HTML = """
 
 ADMIN_HTML = """
 <!doctype html>
@@ -270,7 +356,48 @@ def admin_login_post(username: str = Form(...), password: str = Form(...)):
 
     resp = RedirectResponse("/admin", status_code=302)
     resp.set_cookie(
-@@ -309,65 +428,122 @@ class WindowItem(BaseModel):
+        key=COOKIE_NAME,
+        value=tok,
+        max_age=COOKIE_MAX_AGE_SEC,
+        httponly=True,
+        secure=True,        # Cloud Run HTTPS
+        samesite="lax",
+        path="/",
+    )
+    return resp
+
+@app.get("/admin/logout")
+def admin_logout():
+    resp = RedirectResponse("/admin/login", status_code=302)
+    resp.delete_cookie(COOKIE_NAME, path="/")
+    return resp
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_page(_: bool = Depends(require_login)):
+    # Firestore’a dokunur; izin yoksa burada 500 alırsın (ama deploy’u bozmaz)
+    _ = load_catalog()
+    return ADMIN_HTML
+
+# -------------------- ADMIN API --------------------
+class ConfigItem(BaseModel):
+    default_gas_tl_m3: float = Field(6.0, gt=0)
+    pv_eff: float = Field(0.22, gt=0, le=1)
+    rain_eff: float = Field(0.90, gt=0, le=1)
+    roof_ratio: float = Field(0.50, gt=0, le=1)
+
+class InsulationItem(BaseModel):
+    name: str
+    lambda_value: float = Field(..., gt=0)
+    price_m3: float = Field(..., ge=0)
+    carbon_m3: float = Field(..., ge=0)
+    active: bool = True
+
+class WindowItem(BaseModel):
+    name: str
+    u_value: float = Field(..., gt=0)
+    price_m2: float = Field(0, ge=0)
+    carbon_m2: float = Field(0, ge=0)
+    active: bool = True
 
 class GasTariffItem(BaseModel):
     province: str
@@ -279,30 +406,36 @@ class GasTariffItem(BaseModel):
 
 @app.get("/admin/api/catalog")
 def admin_get_catalog(_: bool = Depends(require_login)):
+    require_firestore()
     return load_catalog()
 
 @app.put("/admin/api/config")
 def admin_put_config(item: ConfigItem, _: bool = Depends(require_login)):
+    require_firestore()
     set_doc("config", "main", item.model_dump())
     return {"ok": True}
 
 @app.put("/admin/api/insulations/{doc_id}")
 def admin_put_insulation(doc_id: str, item: InsulationItem, _: bool = Depends(require_login)):
+    require_firestore()
     set_doc("insulations", doc_id, item.model_dump())
     return {"ok": True}
 
 @app.put("/admin/api/windows/{doc_id}")
 def admin_put_window(doc_id: str, item: WindowItem, _: bool = Depends(require_login)):
+    require_firestore()
     set_doc("windows", doc_id, item.model_dump())
     return {"ok": True}
 
 @app.delete("/admin/api/windows/{doc_id}")
 def admin_delete_window(doc_id: str, _: bool = Depends(require_login)):
+    require_firestore()
     delete_doc("windows", doc_id)
     return {"ok": True}
 
 @app.put("/admin/api/gas_tariffs/{doc_id}")
 def admin_put_gas(doc_id: str, item: GasTariffItem, _: bool = Depends(require_login)):
+    require_firestore()
     payload = item.model_dump()
     payload["province"] = payload["province"].strip().upper()
     set_doc("gas_tariffs", doc_id, payload)
@@ -310,11 +443,13 @@ def admin_put_gas(doc_id: str, item: GasTariffItem, _: bool = Depends(require_lo
 
 @app.delete("/admin/api/insulations/{doc_id}")
 def admin_delete_insulation(doc_id: str, _: bool = Depends(require_login)):
+    require_firestore()
     delete_doc("insulations", doc_id)
     return {"ok": True}
 
 @app.delete("/admin/api/gas_tariffs/{doc_id}")
 def admin_delete_gas(doc_id: str, _: bool = Depends(require_login)):
+    require_firestore()
     delete_doc("gas_tariffs", doc_id)
     return {"ok": True}
 
@@ -341,6 +476,7 @@ def province_from_coords(lat: float, lng: float) -> Optional[str]:
 
 @app.get("/admin/api/geo-gas")
 def admin_geo_gas(lat: float, lng: float, _: bool = Depends(require_login)):
+    require_firestore()
     province = province_from_coords(lat, lng)
     if not province:
         raise HTTPException(404, "Koordinattan il bulunamadı")
@@ -372,12 +508,20 @@ def analyze(inp: AnalyzeInput):
     cat = load_catalog()
     cfg = cat["config"]
     win_db = cat["windows"]
+    try:
+        cat = load_catalog()
+    except Exception:
+        cat = fallback_catalog()
 
-    win = win_db.get(inp.mevcut_pencere) or next(iter(win_db.values()))
-    gas_price = inp.dogalgaz_fiyat if inp.dogalgaz_fiyat > 0 else float(cfg.get("default_gas_tl_m3", 6.0))
+    cfg = cat.get("config", DEFAULT_CONFIG)
+    win_db = cat.get("windows", {})
+
+    win = win_db.get(inp.mevcut_pencere) or next(iter(win_db.values()), DEFAULT_WINDOW)
     province = province_from_coords(inp.lat, inp.lng)
     gas_by_province = cat["gas_by_province"]
 
+    win = win_db.get(inp.mevcut_pencere) or next(iter(win_db.values()))
+    gas_price = inp.dogalgaz_fiyat if inp.dogalgaz_fiyat > 0 else float(cfg.get("default_gas_tl_m3", 6.0))
     gas_price = inp.dogalgaz_fiyat
     if gas_price <= 0 and province:
         gas_price = float(gas_by_province.get(province, 0))
