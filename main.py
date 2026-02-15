@@ -576,22 +576,36 @@ def ts825_zone_for_province(province: Optional[str]) -> int:
     return TS825_ZONE_BY_PROVINCE.get(province.upper(), 3)
 
 
+
+
+def _extract_openmeteo_daily(data: Dict[str, Any]) -> Dict[str, List[float]]:
+    if not isinstance(data, dict) or data.get("error"):
+        return {}
+    daily = data.get("daily", {})
+    temps = [float(x) for x in daily.get("temperature_2m_mean", []) if x is not None]
+    rains = [float(x) for x in daily.get("precipitation_sum", []) if x is not None]
+    suns = [float(x) for x in daily.get("shortwave_radiation_sum", []) if x is not None]
+    if not temps:
+        return {}
+    return {"temps": temps, "rains": rains, "suns": suns}
+
 def fetch_openmeteo_2050(lat: float, lng: float, scenario: str, zone: int) -> Dict[str, float]:
     base_params = {
         "latitude": lat,
         "longitude": lng,
-        "start_date": "2046-01-01",
-        "end_date": "2055-12-31",
+        # Climate API çoğu modelde 2050 üstünü kabul etmiyor; bu yüzden bitiş 2050.
+        "start_date": "2041-01-01",
+        "end_date": "2050-12-31",
         "daily": "temperature_2m_mean,precipitation_sum,shortwave_radiation_sum",
         "scenario": scenario,
     }
 
-    # Open-Meteo tarafında model/parametre değişimlerine karşı birkaç kombinasyonu deneriz.
     attempts = [
         dict(base_params),
         dict(base_params, models="MRI_AGCM3_2_S"),
         dict(base_params, models="MRI_AGCM3-2-S"),
-        dict(base_params, start_date="2041-01-01", end_date="2050-12-31"),
+        dict(base_params, start_date="2046-01-01", end_date="2050-12-31"),
+        dict(base_params, start_date="2050-01-01", end_date="2050-12-31"),
     ]
 
     for params in attempts:
@@ -603,12 +617,13 @@ def fetch_openmeteo_2050(lat: float, lng: float, scenario: str, zone: int) -> Di
         except Exception:
             continue
 
-        daily = data.get("daily", {})
-        temps = [float(x) for x in daily.get("temperature_2m_mean", []) if x is not None]
-        rains = [float(x) for x in daily.get("precipitation_sum", []) if x is not None]
-        suns = [float(x) for x in daily.get("shortwave_radiation_sum", []) if x is not None]
-        if not temps:
+        parsed = _extract_openmeteo_daily(data)
+        if not parsed:
             continue
+
+        temps = parsed["temps"]
+        rains = parsed["rains"]
+        suns = parsed["suns"]
 
         t_mean = sum(temps) / len(temps)
         yearly_rain = (sum(rains) / max(len(rains), 1)) * 365.0
@@ -647,12 +662,12 @@ def fetch_openmeteo_current(lat: float, lng: float, zone: int) -> Dict[str, floa
     try:
         with urllib.request.urlopen(req, timeout=12) as r:
             data = json.loads(r.read().decode("utf-8"))
-        daily = data.get("daily", {})
-        temps = [float(x) for x in daily.get("temperature_2m_mean", []) if x is not None]
-        rains = [float(x) for x in daily.get("precipitation_sum", []) if x is not None]
-        suns = [float(x) for x in daily.get("shortwave_radiation_sum", []) if x is not None]
-        if not temps:
+        parsed = _extract_openmeteo_daily(data)
+        if not parsed:
             raise ValueError("temperature data missing")
+        temps = parsed["temps"]
+        rains = parsed["rains"]
+        suns = parsed["suns"]
         t_mean = sum(temps) / len(temps)
         yearly_rain = sum(rains)
         yearly_sun = sum(suns) / 1000.0
