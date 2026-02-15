@@ -6,6 +6,7 @@ import base64
 import json
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Dict, Any, Optional, List
 
 from fastapi import FastAPI, HTTPException, Request, Depends, Form
@@ -56,6 +57,15 @@ app.add_middleware(
 )
 
 # -------------------- HEALTH --------------------
+
+
+@app.get("/", response_class=HTMLResponse)
+def frontend_page():
+    fp = Path(__file__).with_name("frontend.html")
+    if not fp.exists():
+        raise HTTPException(404, "frontend.html bulunamadı")
+    return HTMLResponse(fp.read_text(encoding="utf-8"))
+
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -531,22 +541,153 @@ def province_from_coords(lat: float, lng: float) -> Optional[str]:
         return None
     return str(province).strip().upper()
 
-@app.get("/admin/api/geo-gas")
-def admin_geo_gas(lat: float, lng: float, _: bool = Depends(require_login)):
-    require_firestore()
-    province = province_from_coords(lat, lng)
-    if not province:
-        raise HTTPException(404, "Koordinattan il bulunamadı")
 
-    cat = load_catalog()
-    price = cat["gas_by_province"].get(province)
+TS825_U_WALL_MAX_BY_ZONE = {
+    1: 0.70,
+    2: 0.60,
+    3: 0.50,
+    4: 0.40,
+}
+
+TS825_ZONE_BY_PROVINCE = {
+    "ADANA": 1, "ANTALYA": 1, "MERSIN": 1, "HATAY": 1, "MUĞLA": 1, "MUGLA": 1, "AYDIN": 1, "İZMİR": 1, "IZMIR": 1,
+    "TEKİRDAĞ": 2, "TEKIRDAG": 2, "BALIKESİR": 2, "BALIKESIR": 2, "BURSA": 2, "İSTANBUL": 2, "ISTANBUL": 2,
+    "ANKARA": 3, "ESKİŞEHİR": 3, "ESKISEHIR": 3, "KONYA": 3, "SAMSUN": 3, "TRABZON": 3,
+    "ERZURUM": 4, "KARS": 4, "ARDAHAN": 4, "AĞRI": 4, "AGRI": 4, "SİVAS": 4, "SIVAS": 4,
+}
+
+DEFAULT_INSULATIONS = [
+    {"name": "Taş Yünü (Sert)", "lambda_value": 0.035, "price_m3": 2800.0, "carbon_m3": 150.0, "active": True},
+    {"name": "EPS", "lambda_value": 0.038, "price_m3": 2100.0, "carbon_m3": 95.0, "active": True},
+    {"name": "XPS", "lambda_value": 0.032, "price_m3": 3300.0, "carbon_m3": 180.0, "active": True},
+]
+
+DEFAULT_WINDOWS = [
+    {"name": "Tek Cam (Standart)", "u_value": 5.8, "price_m2": 1200.0, "carbon_m2": 18.0, "active": True},
+    {"name": "Çift Cam (Isıcam S)", "u_value": 2.8, "price_m2": 3200.0, "carbon_m2": 25.0, "active": True},
+    {"name": "Üçlü Cam (Isıcam K)", "u_value": 1.6, "price_m2": 4600.0, "carbon_m2": 34.0, "active": True},
+]
+
+
+def ts825_zone_for_province(province: Optional[str]) -> int:
+    if not province:
+        return 3
+    return TS825_ZONE_BY_PROVINCE.get(province.upper(), 3)
+
+
+def fetch_openmeteo_2050(lat: float, lng: float, scenario: str, zone: int) -> Dict[str, float]:
+    url = "https://climate-api.open-meteo.com/v1/climate?" + urllib.parse.urlencode({
+        "latitude": lat,
+        "longitude": lng,
+        "start_date": "2046-01-01",
+        "end_date": "2055-12-31",
+        "models": "MRI_AGCM3_2_S",
+        "daily": "temperature_2m_mean,precipitation_sum,shortwave_radiation_sum",
+        "scenario": scenario,
+    })
+    req = urllib.request.Request(url, headers={"User-Agent": "chronobuild-climate/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=12) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        daily = data.get("daily", {})
+        temps = [float(x) for x in daily.get("temperature_2m_mean", []) if x is not None]
+        rains = [float(x) for x in daily.get("precipitation_sum", []) if x is not None]
+        suns = [float(x) for x in daily.get("shortwave_radiation_sum", []) if x is not None]
+        if not temps:
+            raise ValueError("temperature data missing")
+        t_mean = sum(temps) / len(temps)
+        yearly_rain = (sum(rains) / max(len(rains), 1)) * 365.0
+        yearly_sun = (sum(suns) / max(len(suns), 1)) * 365.0 / 1000.0
+        hdd = max(0.0, (18.0 - t_mean) * 365.0)
+        return {
+            "hdd": round(hdd, 1),
+            "yagis_mm": round(yearly_rain, 1),
+            "gunes_kwh_m2": round(yearly_sun, 1),
+            "temp_mean_c": round(t_mean, 2),
+            "kaynak": "open-meteo",
+        }
+    except Exception:
+        base_hdd = {1: 1200.0, 2: 1900.0, 3: 2600.0, 4: 3400.0}.get(zone, 2600.0)
+        delta = {"ssp126": -120.0, "ssp245": -260.0, "ssp585": -420.0}.get(scenario, -260.0)
+        return {
+            "hdd": round(max(600.0, base_hdd + delta), 1),
+            "yagis_mm": 620.0,
+            "gunes_kwh_m2": 1550.0,
+            "temp_mean_c": round(18.0 - max(600.0, base_hdd + delta) / 365.0, 2),
+            "kaynak": "fallback",
+        }
+
+
+def round_up_5(cm: float) -> int:
+    cm = max(cm, 5.0)
+    return int(((cm + 4.999) // 5) * 5)
+
+
+def get_windows(cat: Dict[str, Any]) -> List[Dict[str, Any]]:
+    win_map = cat.get("windows", {})
+    out = [dict(v) for v in win_map.values() if v.get("active", True)]
+    if not out:
+        out = [dict(x) for x in DEFAULT_WINDOWS]
+    return out
+
+
+def get_insulations(cat: Dict[str, Any]) -> List[Dict[str, Any]]:
+    ins_map = cat.get("insulations", {})
+    out = [dict(v) for v in ins_map.values() if v.get("active", True)]
+    if not out:
+        out = [dict(x) for x in DEFAULT_INSULATIONS]
+    return out
+
+
+def calc_building_metrics(area_base: float, floors: int, floor_h: float) -> Dict[str, float]:
+    base = max(20.0, area_base)
+    fl = max(1, floors)
+    h = max(2.2, floor_h)
+    perimeter = 4.0 * (base ** 0.5)
+    wall_area = perimeter * fl * h
+    window_area = wall_area * 0.22
+    opaque_area = max(1.0, wall_area - window_area)
+    roof_area = base
     return {
-        "province": province,
-        "gas_price_tl_m3": price,
-        "fallback_default": float(cat["config"].get("default_gas_tl_m3", 6.0)),
+        "wall_area_m2": wall_area,
+        "window_area_m2": window_area,
+        "opaque_wall_area_m2": opaque_area,
+        "roof_area_m2": roof_area,
     }
 
-# -------------------- ANALYZE (şimdilik test) --------------------
+
+def evaluate_option(option: Dict[str, Any], win: Dict[str, Any], metrics: Dict[str, float], climate: Dict[str, float], gas_price: float, r_base_layers: float) -> Dict[str, float]:
+    lam = float(option["lambda_value"])
+    t_m = float(option["kalinlik_cm"]) / 100.0
+    r_total = max(0.05, r_base_layers + (t_m / lam))
+    u_wall = 1.0 / r_total
+    u_window = float(win.get("u_value", 2.8))
+
+    hdd = float(climate["hdd"])
+    ht = u_wall * metrics["opaque_wall_area_m2"] + u_window * metrics["window_area_m2"]
+    annual_kwh = ht * hdd * 24.0 / 1000.0
+
+    gas_m3 = annual_kwh / (0.90 * 10.64)
+    annual_tl = gas_m3 * gas_price
+    annual_co2 = gas_m3 * 1.90
+
+    ins_vol = metrics["opaque_wall_area_m2"] * t_m
+    insulation_invest = ins_vol * float(option.get("price_m3", 0.0))
+    insulation_emb = ins_vol * float(option.get("carbon_m3", 0.0))
+
+    win_invest = metrics["window_area_m2"] * float(win.get("price_m2", 0.0))
+    win_emb = metrics["window_area_m2"] * float(win.get("carbon_m2", 0.0))
+
+    return {
+        "u_wall": round(u_wall, 3),
+        "yillik_gaz_m3": round(gas_m3, 1),
+        "yillik_tutar_tl": round(annual_tl, 1),
+        "yillik_co2_kg": round(annual_co2, 1),
+        "yatirim_tl": round(insulation_invest + win_invest, 1),
+        "embodied_co2_kg": round(insulation_emb + win_emb, 1),
+    }
+
+
 class AnalyzeInput(BaseModel):
     lat: float
     lng: float
@@ -554,11 +695,13 @@ class AnalyzeInput(BaseModel):
     kat_sayisi: int
     kat_yuksekligi: float = 2.8
     dogalgaz_fiyat: float = 0.0
-    senaryo: str
-    mevcut_pencere: str
+    senaryo: str = "ssp245"
+    mevcut_pencere: str = "Çift Cam (Isıcam S)"
+    r_base_layers: float = 0.50
 
     class Config:
         extra = "ignore"
+
 
 @app.post("/analyze")
 def analyze(inp: AnalyzeInput):
@@ -568,22 +711,138 @@ def analyze(inp: AnalyzeInput):
         cat = fallback_catalog()
 
     cfg = cat.get("config", DEFAULT_CONFIG)
-    win_db = cat.get("windows", {})
-
-    win = win_db.get(inp.mevcut_pencere) or next(iter(win_db.values()), DEFAULT_WINDOW)
     province = province_from_coords(inp.lat, inp.lng)
-    gas_by_province = cat["gas_by_province"]
+    zone = ts825_zone_for_province(province)
+    u_wall_max = TS825_U_WALL_MAX_BY_ZONE[zone]
 
+    gas_by_province = cat.get("gas_by_province", {})
     gas_price = inp.dogalgaz_fiyat
     if gas_price <= 0 and province:
         gas_price = float(gas_by_province.get(province, 0))
     if gas_price <= 0:
         gas_price = float(cfg.get("default_gas_tl_m3", 6.0))
 
-    return {
-        "mevcut": {"pencere": win["name"], "u_pencere": win["u_value"], "gaz_fiyat": gas_price, "il": province},
-        "note": "Login + Firestore altyapısı hazır. TS825+2050 bloğunu bu analyze'e entegre edeceğiz."
+    windows = get_windows(cat)
+    win_current = next((w for w in windows if w.get("name") == inp.mevcut_pencere), windows[0])
+    win_best = min(windows, key=lambda w: float(w.get("u_value", 99)))
+
+    insulations = get_insulations(cat)
+    r_base = max(0.05, inp.r_base_layers)
+    for ins in insulations:
+        req_t_m = max(0.01, (1.0 / u_wall_max - r_base) * float(ins["lambda_value"]))
+        ins["kalinlik_cm"] = round_up_5(req_t_m * 100.0)
+
+    climate_2050 = fetch_openmeteo_2050(inp.lat, inp.lng, inp.senaryo, zone)
+
+    metrics = calc_building_metrics(inp.taban_alani, inp.kat_sayisi, inp.kat_yuksekligi)
+    roof_area_eff = metrics["roof_area_m2"] * float(cfg.get("roof_ratio", 0.50))
+
+    # TS825 baz çözüm: en düşük yatırım maliyetli yalıtım + kullanıcının mevcut penceresi
+    base_candidates = []
+    for ins in insulations:
+        calc = evaluate_option(ins, win_current, metrics, climate_2050, gas_price, r_base)
+        base_candidates.append((ins, calc))
+    base_ins, base_calc = min(base_candidates, key=lambda x: x[1]["yatirim_tl"])
+
+    # AI çözüm: yalıtım + en iyi pencere kombinasyonları içinde hedefleri sağlayan en iyi opsiyon
+    ai_candidates = []
+    for ins in insulations:
+        for w in [win_current, win_best]:
+            calc = evaluate_option(ins, w, metrics, climate_2050, gas_price, r_base)
+            save_tl = max(0.0, base_calc["yillik_tutar_tl"] - calc["yillik_tutar_tl"])
+            save_gas = max(0.0, base_calc["yillik_gaz_m3"] - calc["yillik_gaz_m3"])
+            save_co2 = max(0.0, base_calc["yillik_co2_kg"] - calc["yillik_co2_kg"])
+            pb_eco = (calc["yatirim_tl"] / save_tl) if save_tl > 0 else 99.0
+            pb_carb = (calc["embodied_co2_kg"] / save_co2) if save_co2 > 0 else 99.0
+            ai_candidates.append({
+                "ins": ins,
+                "win": w,
+                "calc": calc,
+                "save_tl": round(save_tl, 1),
+                "save_gas": round(save_gas, 1),
+                "save_co2": round(save_co2, 1),
+                "pb_eco": round(pb_eco, 1),
+                "pb_carb": round(pb_carb, 1),
+            })
+
+    feasible = [x for x in ai_candidates if x["pb_eco"] <= 10 and x["pb_carb"] <= 5]
+    if feasible:
+        ai = max(feasible, key=lambda x: x["save_tl"])
+    else:
+        ai = min(ai_candidates, key=lambda x: x["pb_eco"])
+
+    alt = None
+    if ai["pb_eco"] > 10:
+        alt = min(ai_candidates, key=lambda x: (x["pb_eco"], -x["save_tl"]))
+
+    pv_kwh = round(roof_area_eff * climate_2050["gunes_kwh_m2"] * float(cfg.get("pv_eff", 0.22)), 1)
+    su_hasadi = round(metrics["roof_area_m2"] * (climate_2050["yagis_mm"] / 1000.0) * float(cfg.get("rain_eff", 0.90)), 1)
+
+    resp = {
+        "mevcut": {
+            "province": province,
+            "ts825_zone": zone,
+            "u_wall_max": u_wall_max,
+            "yalitim": base_ins["name"],
+            "kalinlik_cm": int(base_ins["kalinlik_cm"]),
+            "pencere": win_current.get("name", "-"),
+            "y2050": {
+                "yillik_gaz_m3": base_calc["yillik_gaz_m3"],
+                "yillik_tutar_tl": base_calc["yillik_tutar_tl"],
+                "yillik_co2_kg": base_calc["yillik_co2_kg"],
+            },
+        },
+        "ai_onerisi": {
+            "yalitim": ai["ins"]["name"],
+            "kalinlik_cm": int(ai["ins"]["kalinlik_cm"]),
+            "pencere": ai["win"].get("name", "-"),
+            "y2050": {
+                "yillik_gaz_m3": ai["calc"]["yillik_gaz_m3"],
+                "yillik_tutar_tl": ai["calc"]["yillik_tutar_tl"],
+                "yillik_co2_kg": ai["calc"]["yillik_co2_kg"],
+            },
+            "pb_eco_yil": ai["pb_eco"],
+            "pb_carb_yil": ai["pb_carb"],
+            "max_pb_eco_yil": 10,
+            "tasarruf": {
+                "yillik_tasarruf_tl": ai["save_tl"],
+                "yillik_gaz_tasarruf_m3": ai["save_gas"],
+                "yillik_co2_tasarruf_kg": ai["save_co2"],
+            },
+            "yatirim": {
+                "yatirim_tl": ai["calc"]["yatirim_tl"],
+                "embodied_co2_kg": ai["calc"]["embodied_co2_kg"],
+            },
+            "su_hasadi_m3_yil": su_hasadi,
+            "pv_kwh_yil": pv_kwh,
+            "uyari": "10 yıl ekonomik geri ödeme hedefi tutmadı, alternatif gösteriliyor." if ai["pb_eco"] > 10 else None,
+            "alternatif_oneri": None,
+        },
+        "iklim_info": {
+            "senaryo": inp.senaryo,
+            "kaynak": climate_2050.get("kaynak", "fallback"),
+            "y2050": {
+                "hdd": climate_2050["hdd"],
+                "yagis_mm": climate_2050["yagis_mm"],
+                "gunes_kwh_m2": climate_2050["gunes_kwh_m2"],
+                "temp_mean_c": climate_2050["temp_mean_c"],
+            },
+        },
+        "ai_notu": "AI önerisi, TS825 limitini sağlayan seçenekler içinde 2050 senaryosuna göre optimize edilmiştir.",
     }
+
+    if alt is not None:
+        resp["ai_onerisi"]["alternatif_oneri"] = {
+            "tip": "Maliyet-optimum kombinasyon",
+            "yalitim": alt["ins"]["name"],
+            "kalinlik_cm": int(alt["ins"]["kalinlik_cm"]),
+            "pencere": alt["win"].get("name", "-"),
+            "pb_eco_yil": alt["pb_eco"],
+            "yatirim_tl": alt["calc"]["yatirim_tl"],
+            "yillik_tasarruf_tl": alt["save_tl"],
+        }
+
+    return resp
 
 # -------------------- RUN --------------------
 if __name__ == "__main__":
