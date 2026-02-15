@@ -7,6 +7,7 @@ import json
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from datetime import date, timedelta
 from typing import Dict, Any, Optional, List
 
 from fastapi import FastAPI, HTTPException, Request, Depends, Form
@@ -618,6 +619,50 @@ def fetch_openmeteo_2050(lat: float, lng: float, scenario: str, zone: int) -> Di
         }
 
 
+
+
+def fetch_openmeteo_current(lat: float, lng: float, zone: int) -> Dict[str, float]:
+    end = date.today() - timedelta(days=1)
+    start = end - timedelta(days=364)
+    url = "https://archive-api.open-meteo.com/v1/archive?" + urllib.parse.urlencode({
+        "latitude": lat,
+        "longitude": lng,
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "daily": "temperature_2m_mean,precipitation_sum,shortwave_radiation_sum",
+        "timezone": "auto",
+    })
+    req = urllib.request.Request(url, headers={"User-Agent": "chronobuild-climate/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=12) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        daily = data.get("daily", {})
+        temps = [float(x) for x in daily.get("temperature_2m_mean", []) if x is not None]
+        rains = [float(x) for x in daily.get("precipitation_sum", []) if x is not None]
+        suns = [float(x) for x in daily.get("shortwave_radiation_sum", []) if x is not None]
+        if not temps:
+            raise ValueError("temperature data missing")
+        t_mean = sum(temps) / len(temps)
+        yearly_rain = sum(rains)
+        yearly_sun = sum(suns) / 1000.0
+        hdd = max(0.0, sum(max(0.0, 18.0 - t) for t in temps))
+        return {
+            "hdd": round(hdd, 1),
+            "yagis_mm": round(yearly_rain, 1),
+            "gunes_kwh_m2": round(yearly_sun, 1),
+            "temp_mean_c": round(t_mean, 2),
+            "kaynak": "open-meteo-archive",
+        }
+    except Exception:
+        base_hdd = {1: 1300.0, 2: 2000.0, 3: 2700.0, 4: 3500.0}.get(zone, 2700.0)
+        return {
+            "hdd": round(base_hdd, 1),
+            "yagis_mm": 650.0,
+            "gunes_kwh_m2": 1500.0,
+            "temp_mean_c": round(18.0 - base_hdd / 365.0, 2),
+            "kaynak": "fallback-current",
+        }
+
 def round_up_5(cm: float) -> int:
     cm = max(cm, 5.0)
     return int(((cm + 4.999) // 5) * 5)
@@ -732,6 +777,7 @@ def analyze(inp: AnalyzeInput):
         req_t_m = max(0.01, (1.0 / u_wall_max - r_base) * float(ins["lambda_value"]))
         ins["kalinlik_cm"] = round_up_5(req_t_m * 100.0)
 
+    climate_current = fetch_openmeteo_current(inp.lat, inp.lng, zone)
     climate_2050 = fetch_openmeteo_2050(inp.lat, inp.lng, inp.senaryo, zone)
 
     metrics = calc_building_metrics(inp.taban_alani, inp.kat_sayisi, inp.kat_yuksekligi)
@@ -820,7 +866,16 @@ def analyze(inp: AnalyzeInput):
         },
         "iklim_info": {
             "senaryo": inp.senaryo,
-            "kaynak": climate_2050.get("kaynak", "fallback"),
+            "kaynak": {
+                "current": climate_current.get("kaynak", "fallback-current"),
+                "y2050": climate_2050.get("kaynak", "fallback"),
+            },
+            "current": {
+                "hdd": climate_current["hdd"],
+                "yagis_mm": climate_current["yagis_mm"],
+                "gunes_kwh_m2": climate_current["gunes_kwh_m2"],
+                "temp_mean_c": climate_current["temp_mean_c"],
+            },
             "y2050": {
                 "hdd": climate_2050["hdd"],
                 "yagis_mm": climate_2050["yagis_mm"],

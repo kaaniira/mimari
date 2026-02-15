@@ -144,10 +144,24 @@
       </div>
 
       <div id="results-display" class="hidden space-y-6 fade-in">
-        <div class="flex flex-wrap gap-4">
-          <div class="bg-indigo-600 text-white px-6 py-3 rounded-2xl text-sm font-bold flex items-center gap-2 shadow-lg"><i class="fa-solid fa-temperature-arrow-up"></i><span id="climate-hdd">-</span> HDD (2050)</div>
-          <div class="bg-white text-slate-600 border border-slate-200 px-6 py-3 rounded-2xl text-sm font-bold flex items-center gap-2 shadow-sm"><i class="fa-solid fa-cloud-rain text-blue-400"></i><span id="climate-rain">-</span> mm Yağış (2050)</div>
-          <div class="bg-white text-slate-600 border border-slate-200 px-6 py-3 rounded-2xl text-sm font-bold flex items-center gap-2 shadow-sm"><i class="fa-solid fa-sun text-amber-400"></i><span id="climate-sun">-</span> kWh/m² (2050)</div>
+        <div class="modern-card p-5">
+          <h3 class="text-xs font-bold text-slate-400 uppercase tracking-widest mb-4">İklim Karşılaştırması (Aynı Bölge)</h3>
+          <div class="grid md:grid-cols-2 gap-4 text-sm">
+            <div class="bg-slate-50 border rounded-2xl p-4 space-y-2">
+              <div class="font-bold text-slate-700">Güncel İklim</div>
+              <div>HDD: <span id="climate-now-hdd" class="font-bold">-</span></div>
+              <div>Yağış: <span id="climate-now-rain" class="font-bold">-</span> mm/yıl</div>
+              <div>Güneş: <span id="climate-now-sun" class="font-bold">-</span> kWh/m²/yıl</div>
+              <div>Ort. Sıcaklık: <span id="climate-now-temp" class="font-bold">-</span> °C</div>
+            </div>
+            <div class="bg-indigo-50 border border-indigo-100 rounded-2xl p-4 space-y-2">
+              <div class="font-bold text-indigo-700">2050 Senaryosu</div>
+              <div>HDD: <span id="climate-fut-hdd" class="font-bold">-</span></div>
+              <div>Yağış: <span id="climate-fut-rain" class="font-bold">-</span> mm/yıl</div>
+              <div>Güneş: <span id="climate-fut-sun" class="font-bold">-</span> kWh/m²/yıl</div>
+              <div>Ort. Sıcaklık: <span id="climate-fut-temp" class="font-bold">-</span> °C</div>
+            </div>
+          </div>
         </div>
 
         <div class="modern-card p-8 lg:p-12 bg-gradient-to-br from-white to-indigo-50 relative overflow-hidden">
@@ -243,9 +257,15 @@
     document.getElementById('ts-zone').innerText = (m.ts825_zone ?? "-");
     document.getElementById('ts-umax').innerText = (m.u_wall_max ?? "-");
 
-    document.getElementById('climate-hdd').innerText = info.y2050.hdd ?? "-";
-    document.getElementById('climate-rain').innerText = info.y2050.yagis_mm ?? "-";
-    document.getElementById('climate-sun').innerText = info.y2050.gunes_kwh_m2 ?? "-";
+    document.getElementById('climate-now-hdd').innerText = info.current?.hdd ?? '-';
+    document.getElementById('climate-now-rain').innerText = info.current?.yagis_mm ?? '-';
+    document.getElementById('climate-now-sun').innerText = info.current?.gunes_kwh_m2 ?? '-';
+    document.getElementById('climate-now-temp').innerText = info.current?.temp_mean_c ?? '-';
+
+    document.getElementById('climate-fut-hdd').innerText = info.y2050?.hdd ?? '-';
+    document.getElementById('climate-fut-rain').innerText = info.y2050?.yagis_mm ?? '-';
+    document.getElementById('climate-fut-sun').innerText = info.y2050?.gunes_kwh_m2 ?? '-';
+    document.getElementById('climate-fut-temp').innerText = info.y2050?.temp_mean_c ?? '-';
 
     document.getElementById('curr-mat').innerText = `${m.kalinlik_cm}cm ${m.yalitim}`;
     document.getElementById('curr-bill').innerText = `${trInt(m.y2050.yillik_tutar_tl)} TL / yıl`;
