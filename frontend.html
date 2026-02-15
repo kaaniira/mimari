@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Geleceğin Mimarı | AI Destekli İklim Analizi</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+  <style>
+    body { font-family: 'Inter', sans-serif; background-color: #f8fafc; }
+    .modern-card { background: #fff; border-radius: 40px; box-shadow: 0 10px 40px -10px rgba(0,0,0,.08); border: 1px solid #e2e8f0; }
+    #map { height: 320px; border-radius: 32px; z-index: 1; margin: 0 auto; }
+    .fade-in { animation: fadeIn .5s ease-out forwards; }
+    @keyframes fadeIn { from { opacity:0; transform: translateY(10px);} to { opacity:1; transform: translateY(0);} }
+  </style>
+</head>
+
+<body class="text-slate-800 bg-slate-50 min-h-screen flex flex-col">
+
+<header class="flex-none z-50 relative pt-4 px-2 lg:px-4 pb-2">
+  <div class="w-full max-w-[98%] mx-auto bg-white border border-slate-200 shadow-sm rounded-[32px] px-6 lg:px-8 h-24 flex justify-between items-center">
+    <div class="flex items-center gap-4">
+      <div class="w-14 h-14 bg-indigo-600 rounded-[20px] flex items-center justify-center text-white shadow-lg">
+        <i class="fa-solid fa-cube text-2xl"></i>
+      </div>
+      <h1 class="text-2xl font-extrabold tracking-tight text-slate-900 leading-none uppercase">Geleceğin Mimarı</h1>
+    </div>
+    <div class="hidden md:flex items-center gap-3 px-4 py-2 bg-emerald-50 text-emerald-700 rounded-full border border-emerald-100 text-xs font-bold">
+      <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span> SİSTEM ONLİNE
+    </div>
+  </div>
+</header>
+
+<main class="flex-grow container mx-auto p-4 lg:p-8 flex flex-col gap-10">
+
+  <div class="modern-card p-6 lg:p-10 text-center w-full shadow-xl">
+    <h2 class="text-sm font-bold text-slate-400 uppercase tracking-widest mb-8 flex items-center justify-center gap-3">
+      <i class="fa-solid fa-location-dot text-indigo-500"></i> Analiz Bölgesi Seçimi
+    </h2>
+
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-8 items-center">
+      <div class="lg:col-span-9">
+        <div id="map" class="border-[6px] border-slate-50"></div>
+      </div>
+
+      <div class="lg:col-span-3 space-y-5 text-left">
+        <div class="bg-slate-50 p-6 rounded-[32px] border border-slate-100">
+          <p class="text-[10px] text-slate-400 font-bold mb-4 tracking-wide border-b pb-2 uppercase">Koordinatlar</p>
+          <div class="space-y-3 font-mono text-sm">
+            <div><span class="text-slate-400">Lat:</span> <span id="lat-display" class="font-bold text-indigo-600">41.0100</span></div>
+            <div><span class="text-slate-400">Lng:</span> <span id="lng-display" class="font-bold text-indigo-600">28.9700</span></div>
+          </div>
+        </div>
+
+        <div class="bg-slate-50 p-6 rounded-[32px] border border-slate-100">
+          <p class="text-[10px] text-slate-400 font-bold mb-4 tracking-wide border-b pb-2 uppercase">TS 825 Bilgisi</p>
+          <div class="space-y-2 text-sm">
+            <div class="flex justify-between"><span class="text-slate-500">İl:</span> <span id="ts-province" class="font-bold">-</span></div>
+            <div class="flex justify-between"><span class="text-slate-500">DG Bölge:</span> <span id="ts-zone" class="font-bold">-</span></div>
+            <div class="flex justify-between"><span class="text-slate-500">Umax (Duvar):</span> <span id="ts-umax" class="font-bold">-</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start w-full">
+
+    <aside class="lg:col-span-4 space-y-4">
+      <div class="modern-card p-6 lg:p-8 space-y-8 text-center">
+
+        <div>
+          <h2 class="text-xs font-bold text-slate-400 uppercase tracking-widest mb-4">İklim Senaryosu (2050)</h2>
+          <div class="space-y-3 text-left">
+            <label class="flex items-center p-3 border rounded-[20px] cursor-pointer hover:bg-slate-50 transition-all has-[:checked]:bg-indigo-50">
+              <input type="radio" name="scenario" value="ssp126" class="w-5 h-5 text-indigo-600">
+              <div class="ml-4"><span class="block text-xs font-bold text-emerald-600 uppercase">İyimser (SSP1)</span></div>
+            </label>
+            <label class="flex items-center p-3 border rounded-[20px] cursor-pointer hover:bg-slate-50 transition-all has-[:checked]:bg-indigo-50">
+              <input type="radio" name="scenario" value="ssp245" checked class="w-5 h-5 text-indigo-600">
+              <div class="ml-4"><span class="block text-xs font-bold text-amber-600 uppercase">Orta Yol (SSP2)</span></div>
+            </label>
+            <label class="flex items-center p-3 border rounded-[20px] cursor-pointer hover:bg-slate-50 transition-all has-[:checked]:bg-indigo-50">
+              <input type="radio" name="scenario" value="ssp585" class="w-5 h-5 text-indigo-600">
+              <div class="ml-4"><span class="block text-xs font-bold text-rose-600 uppercase">Kötümser (SSP5)</span></div>
+            </label>
+          </div>
+        </div>
+
+        <div>
+          <h2 class="text-xs font-bold text-slate-400 uppercase tracking-widest mb-4">Bina Verileri</h2>
+          <div class="grid grid-cols-2 gap-3 mb-3">
+            <div>
+              <label class="text-[10px] text-slate-400 font-bold block mb-1">Taban (m²)</label>
+              <input type="number" id="base_area" value="120" class="w-full p-3 text-sm border rounded-2xl font-bold text-center bg-slate-50">
+            </div>
+            <div>
+              <label class="text-[10px] text-slate-400 font-bold block mb-1">Kat Sayısı</label>
+              <input type="number" id="floors" value="3" class="w-full p-3 text-sm border rounded-2xl font-bold text-center bg-slate-50">
+            </div>
+            <div>
+              <label class="text-[10px] text-slate-400 font-bold block mb-1">Kat Yük. (m)</label>
+              <input type="number" id="height" value="2.8" step="0.1" class="w-full p-3 text-sm border rounded-2xl font-bold text-center bg-slate-50">
+            </div>
+            <div>
+              <label class="text-[10px] text-slate-400 font-bold block mb-1">D.Gaz (TL/m³)</label>
+              <input type="number" id="gas_price" value="6.0" step="0.1" class="w-full p-3 text-sm border rounded-2xl font-bold text-center bg-slate-50">
+            </div>
+          </div>
+
+          <select id="pencere_tipi" class="w-full p-3.5 text-sm border rounded-2xl font-bold text-center bg-slate-50 cursor-pointer">
+            <option value="Tek Cam (Standart)">Tek Cam</option>
+            <option value="Çift Cam (Isıcam S)" selected>Çift Cam</option>
+            <option value="Üçlü Cam (Isıcam K)">Üçlü Cam</option>
+          </select>
+
+          <div class="mt-4">
+            <label class="text-[10px] text-slate-400 font-bold block mb-1">Duvar Baz R (yalıtım hariç)</label>
+            <input type="number" id="r_base_layers" value="0.50" step="0.05"
+                   class="w-full p-3 text-sm border rounded-2xl font-bold text-center bg-slate-50">
+          </div>
+        </div>
+
+        <button onclick="runAnalysis()" id="btn-calc"
+                class="w-full bg-slate-900 hover:bg-indigo-900 text-white py-5 rounded-[24px] font-bold text-sm shadow-xl transition-all active:scale-95 flex items-center justify-center gap-3">
+          <span>ANALİZİ BAŞLAT</span> <i class="fa-solid fa-arrow-right"></i>
+        </button>
+      </div>
+    </aside>
+
+    <section class="lg:col-span-8 space-y-6">
+      <div id="start-placeholder" class="modern-card min-h-[500px] flex flex-col items-center justify-center text-center p-8 border-dashed border-2 opacity-40">
+        <i class="fa-solid fa-chart-line text-6xl mb-6"></i>
+        <h3 class="text-2xl font-bold">Veri Bekleniyor</h3>
+      </div>
+      <div id="loader" class="hidden min-h-[500px] modern-card flex flex-col items-center justify-center text-center p-8">
+        <div class="w-20 h-20 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mb-6"></div>
+        <p class="font-bold">CMIP6 Modelleri İşleniyor...</p>
+      </div>
+
+      <div id="results-display" class="hidden space-y-6 fade-in">
+        <div class="flex flex-wrap gap-4">
+          <div class="bg-indigo-600 text-white px-6 py-3 rounded-2xl text-sm font-bold flex items-center gap-2 shadow-lg"><i class="fa-solid fa-temperature-arrow-up"></i><span id="climate-hdd">-</span> HDD (2050)</div>
+          <div class="bg-white text-slate-600 border border-slate-200 px-6 py-3 rounded-2xl text-sm font-bold flex items-center gap-2 shadow-sm"><i class="fa-solid fa-cloud-rain text-blue-400"></i><span id="climate-rain">-</span> mm Yağış (2050)</div>
+          <div class="bg-white text-slate-600 border border-slate-200 px-6 py-3 rounded-2xl text-sm font-bold flex items-center gap-2 shadow-sm"><i class="fa-solid fa-sun text-amber-400"></i><span id="climate-sun">-</span> kWh/m² (2050)</div>
+        </div>
+
+        <div class="modern-card p-8 lg:p-12 bg-gradient-to-br from-white to-indigo-50 relative overflow-hidden">
+          <div class="relative z-10 grid grid-cols-1 md:grid-cols-2 gap-10">
+            <div class="space-y-4">
+              <h3 class="text-xs font-bold text-slate-400 uppercase tracking-widest border-b pb-2">TS 825 Baz (2050 Riski)</h3>
+              <div class="flex justify-between"><span>Mantolama:</span> <span id="curr-mat" class="font-bold">-</span></div>
+              <div class="flex justify-between"><span>Yıllık Gider:</span> <span id="curr-bill" class="font-bold">-</span></div>
+              <div class="flex justify-between"><span>CO₂ (işletme):</span> <span id="curr-carb" class="font-bold">-</span></div>
+              <div class="flex justify-between"><span>Gaz:</span> <span id="curr-gas" class="font-bold">-</span></div>
+            </div>
+            <div class="space-y-4 border-l-2 border-indigo-100 pl-8">
+              <h3 class="text-xs font-bold text-indigo-600 uppercase tracking-widest border-b border-indigo-100 pb-2">AI Önerisi (2050)</h3>
+              <div class="flex justify-between"><span id="ai-mat" class="font-bold text-indigo-700 bg-indigo-100 px-3 py-1 rounded-xl text-sm">-</span></div>
+              <div class="flex justify-between text-emerald-700 font-bold"><span>Yeni Gider:</span> <span id="ai-bill">-</span></div>
+              <div class="flex justify-between text-emerald-700 font-bold"><span>Yeni CO₂ (işletme):</span> <span id="ai-carb">-</span></div>
+              <div class="flex justify-between text-emerald-700 font-bold"><span>Yeni Gaz:</span> <span id="ai-gas">-</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script>
+  const API_URL = `${window.location.origin}/analyze`;
+  const map = L.map('map').setView([41.01, 28.97], 6);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png').addTo(map);
+  let marker = L.marker([41.01, 28.97], { draggable: true }).addTo(map);
+
+  map.on('click', e => updateMarker(e.latlng.lat, e.latlng.lng));
+  marker.on('drag', () => { const p = marker.getLatLng(); updateMarker(p.lat, p.lng); });
+
+  function updateMarker(lat, lng) {
+    marker.setLatLng([lat, lng]);
+    document.getElementById('lat-display').innerText = lat.toFixed(4);
+    document.getElementById('lng-display').innerText = lng.toFixed(4);
+  }
+  function trInt(n){ return (Number(n)||0).toLocaleString('tr-TR'); }
+
+  async function runAnalysis() {
+    const btn = document.getElementById('btn-calc');
+    const placeholder = document.getElementById('start-placeholder');
+    const loader = document.getElementById('loader');
+    const results = document.getElementById('results-display');
+
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i>';
+    placeholder.classList.add('hidden');
+    results.classList.add('hidden');
+    loader.classList.remove('hidden');
+
+    const payload = {
+      lat: marker.getLatLng().lat,
+      lng: marker.getLatLng().lng,
+      taban_alani: parseFloat(document.getElementById('base_area').value) || 120,
+      kat_sayisi: parseInt(document.getElementById('floors').value) || 3,
+      kat_yuksekligi: parseFloat(document.getElementById('height').value) || 2.8,
+      dogalgaz_fiyat: parseFloat(document.getElementById('gas_price').value) || 6.0,
+      senaryo: document.querySelector('input[name="scenario"]:checked').value,
+      mevcut_pencere: document.getElementById('pencere_tipi').value,
+      r_base_layers: parseFloat(document.getElementById('r_base_layers').value) || 0.50
+    };
+
+    try {
+      const response = await fetch(API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) throw new Error('Sunucu Hatası: ' + response.status);
+      const data = await response.json();
+      updateUI(data);
+    } catch (e) {
+      console.warn(e);
+      alert('Analiz hatası: ' + e.message);
+    } finally {
+      loader.classList.add('hidden');
+      results.classList.remove('hidden');
+      btn.disabled = false;
+      btn.innerHTML = '<span>ANALİZİ BAŞLAT</span> <i class="fa-solid fa-arrow-right"></i>';
+    }
+  }
+
+  function updateUI(data) {
+    const m = data.mevcut;
+    const ai = data.ai_onerisi;
+    const info = data.iklim_info;
+
+    document.getElementById('ts-province').innerText = m.province || "-";
+    document.getElementById('ts-zone').innerText = (m.ts825_zone ?? "-");
+    document.getElementById('ts-umax').innerText = (m.u_wall_max ?? "-");
+
+    document.getElementById('climate-hdd').innerText = info.y2050.hdd ?? "-";
+    document.getElementById('climate-rain').innerText = info.y2050.yagis_mm ?? "-";
+    document.getElementById('climate-sun').innerText = info.y2050.gunes_kwh_m2 ?? "-";
+
+    document.getElementById('curr-mat').innerText = `${m.kalinlik_cm}cm ${m.yalitim}`;
+    document.getElementById('curr-bill').innerText = `${trInt(m.y2050.yillik_tutar_tl)} TL / yıl`;
+    document.getElementById('curr-carb').innerText = `${trInt(m.y2050.yillik_co2_kg)} kgCO₂ / yıl`;
+    document.getElementById('curr-gas').innerText  = `${trInt(m.y2050.yillik_gaz_m3)} m³ / yıl`;
+
+    document.getElementById('ai-mat').innerText = `${ai.kalinlik_cm}cm ${ai.yalitim}`;
+    document.getElementById('ai-bill').innerText = `${trInt(ai.y2050.yillik_tutar_tl)} TL / yıl`;
+    document.getElementById('ai-carb').innerText = `${trInt(ai.y2050.yillik_co2_kg)} kgCO₂ / yıl`;
+    document.getElementById('ai-gas').innerText  = `${trInt(ai.y2050.yillik_gaz_m3)} m³ / yıl`;
+  }
+
+  setTimeout(()=>{ map.invalidateSize(true); }, 400);
+</script>
+
+</body>
+</html>

@@ -6,6 +6,7 @@ import base64
 import json
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Dict, Any, Optional, List
 
 from fastapi import FastAPI, HTTPException, Request, Depends, Form
@@ -56,6 +57,15 @@ app.add_middleware(
 )
 
 # -------------------- HEALTH --------------------
+
+
+@app.get("/", response_class=HTMLResponse)
+def frontend_page():
+    fp = Path(__file__).with_name("frontend.html")
+    if not fp.exists():
+        raise HTTPException(404, "frontend.html bulunamadı")
+    return HTMLResponse(fp.read_text(encoding="utf-8"))
+
 @app.get("/health")
 def health():
     return {"ok": True}
