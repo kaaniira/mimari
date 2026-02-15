@@ -174,7 +174,8 @@
 </main>
 
 <script>
-  const API_URL = `${window.location.origin}/analyze`;
+  const CLOUD_RUN_BASE = "https://mimari-1086796557469.europe-west3.run.app";
+  const API_URL = `${CLOUD_RUN_BASE}/analyze`;
   const map = L.map('map').setView([41.01, 28.97], 6);
   L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png').addTo(map);
   let marker = L.marker([41.01, 28.97], { draggable: true }).addTo(map);
