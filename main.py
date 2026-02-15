@@ -10,7 +10,6 @@ from typing import Dict, Any, Optional, List
 
 from fastapi import FastAPI, HTTPException, Request, Depends, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -104,7 +103,15 @@ def ensure_defaults_once():
     if not list(_col("insulations").limit(1).stream()):
         set_doc("insulations", "tas_yunu", {
             "name": "Taş Yünü (Sert)",
-@@ -93,50 +115,66 @@ def ensure_defaults_once():
+            "lambda_value": 0.035,
+            "price_m3": 2800,
+            "carbon_m3": 150,
+            "active": True
+        })
+
+    if not list(_col("windows").limit(1).stream()):
+        set_doc("windows", "cift_cam", {
+            "name": "Çift Cam (Isıcam S)",
             "u_value": 2.8,
             "price_m2": 3200,
             "carbon_m2": 25,
@@ -171,7 +178,59 @@ def verify_token(token: str) -> Optional[str]:
     try:
         raw = _b64u_decode(token).decode("utf-8")
         parts = raw.split("|")
-@@ -196,178 +234,359 @@ LOGIN_HTML = """
+        if len(parts) != 3:
+            return None
+        user, exp_s, sig = parts
+        exp = int(exp_s)
+        if exp < int(time.time()):
+            return None
+        msg = f"{user}|{exp}".encode("utf-8")
+        expected = hmac.new(ADMIN_SECRET.encode("utf-8"), msg, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, sig):
+            return None
+        return user
+    except Exception:
+        return None
+
+def require_login(request: Request):
+    tok = request.cookies.get(COOKIE_NAME, "")
+    if not tok:
+        raise HTTPException(status_code=401, detail="Not logged in")
+    user = verify_token(tok)
+    if not user:
+        raise HTTPException(status_code=401, detail="Session invalid/expired")
+    return True
+
+# -------------------- ADMIN PAGES --------------------
+LOGIN_HTML = """
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>ChronoBuild Admin Login</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 text-slate-900 min-h-screen flex items-center justify-center p-6">
+  <div class="w-full max-w-md bg-white border rounded-2xl p-6 shadow-sm">
+    <div class="text-xl font-black">ChronoBuild Admin</div>
+    <div class="text-xs text-slate-500 mt-1">Giriş yap</div>
+
+    {error_block}
+
+    <form method="post" action="/admin/login" class="mt-4 space-y-3">
+      <label class="block text-sm font-bold text-slate-600">Kullanıcı</label>
+      <input name="username" class="w-full border rounded-xl p-3" placeholder="admin" required />
+
+      <label class="block text-sm font-bold text-slate-600">Şifre</label>
+      <input name="password" type="password" class="w-full border rounded-xl p-3" placeholder="••••••••" required />
+
+      <button class="w-full bg-slate-900 text-white rounded-xl p-3 font-bold">Giriş</button>
+    </form>
+  </div>
+</body>
+</html>
+"""
 
 ADMIN_HTML = """
 <!doctype html>
@@ -374,8 +433,6 @@ def admin_logout():
 
 @app.get("/admin", response_class=HTMLResponse)
 def admin_page(_: bool = Depends(require_login)):
-    # Firestore’a dokunur; izin yoksa burada 500 alırsın (ama deploy’u bozmaz)
-    _ = load_catalog()
     return ADMIN_HTML
 
 # -------------------- ADMIN API --------------------
@@ -505,9 +562,6 @@ class AnalyzeInput(BaseModel):
 
 @app.post("/analyze")
 def analyze(inp: AnalyzeInput):
-    cat = load_catalog()
-    cfg = cat["config"]
-    win_db = cat["windows"]
     try:
         cat = load_catalog()
     except Exception:
@@ -520,8 +574,6 @@ def analyze(inp: AnalyzeInput):
     province = province_from_coords(inp.lat, inp.lng)
     gas_by_province = cat["gas_by_province"]
 
-    win = win_db.get(inp.mevcut_pencere) or next(iter(win_db.values()))
-    gas_price = inp.dogalgaz_fiyat if inp.dogalgaz_fiyat > 0 else float(cfg.get("default_gas_tl_m3", 6.0))
     gas_price = inp.dogalgaz_fiyat
     if gas_price <= 0 and province:
         gas_price = float(gas_by_province.get(province, 0))
@@ -529,7 +581,6 @@ def analyze(inp: AnalyzeInput):
         gas_price = float(cfg.get("default_gas_tl_m3", 6.0))
 
     return {
-        "mevcut": {"pencere": win["name"], "u_pencere": win["u_value"], "gaz_fiyat": gas_price},
         "mevcut": {"pencere": win["name"], "u_pencere": win["u_value"], "gaz_fiyat": gas_price, "il": province},
         "note": "Login + Firestore altyapısı hazır. TS825+2050 bloğunu bu analyze'e entegre edeceğiz."
     }
