@@ -4,6 +4,7 @@ import hmac
 import hashlib
 import base64
 import json
+import math
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -578,6 +579,71 @@ def ts825_zone_for_province(province: Optional[str]) -> int:
 
 
 
+_ee_inited = False
+
+def _init_earth_engine() -> bool:
+    global _ee_inited
+    if _ee_inited:
+        return True
+    try:
+        import ee  # type: ignore
+        if PROJECT_ID:
+            ee.Initialize(project=PROJECT_ID)
+        else:
+            ee.Initialize()
+        _ee_inited = True
+        return True
+    except Exception:
+        return False
+
+
+def fetch_gee_cmip6_2050(lat: float, lng: float, scenario: str) -> Optional[Dict[str, float]]:
+    if not _init_earth_engine():
+        return None
+    try:
+        import ee  # type: ignore
+        point = ee.Geometry.Point([lng, lat])
+        collection = (
+            ee.ImageCollection("NASA/GDDP-CMIP6")
+            .filterDate("2041-01-01", "2050-12-31")
+            .filter(ee.Filter.eq("scenario", scenario))
+            .filter(ee.Filter.eq("model", "MRI-ESM2-0"))
+        )
+
+        tas_k = ee.Number(collection.select("tas").mean().reduceRegion(
+            reducer=ee.Reducer.mean(), geometry=point, scale=27830, maxPixels=1e9
+        ).get("tas"))
+        pr_kg_m2_s = ee.Number(collection.select("pr").mean().reduceRegion(
+            reducer=ee.Reducer.mean(), geometry=point, scale=27830, maxPixels=1e9
+        ).get("pr"))
+        rsds_w_m2 = ee.Number(collection.select("rsds").mean().reduceRegion(
+            reducer=ee.Reducer.mean(), geometry=point, scale=27830, maxPixels=1e9
+        ).get("rsds"))
+
+        out = {
+            "temp_mean_c": tas_k.subtract(273.15),
+            "yagis_mm": pr_kg_m2_s.multiply(86400).multiply(365),
+            "gunes_kwh_m2": rsds_w_m2.multiply(24).multiply(365).divide(1000),
+        }
+        vals = ee.Dictionary(out).getInfo() or {}
+        temp_mean_c = vals.get("temp_mean_c")
+        yagis_mm = vals.get("yagis_mm")
+        gunes_kwh_m2 = vals.get("gunes_kwh_m2")
+        if temp_mean_c is None:
+            return None
+
+        hdd = max(0.0, (18.0 - float(temp_mean_c)) * 365.0)
+        return {
+            "hdd": round(hdd, 1),
+            "yagis_mm": None if yagis_mm is None else round(float(yagis_mm), 1),
+            "gunes_kwh_m2": None if gunes_kwh_m2 is None else round(float(gunes_kwh_m2), 1),
+            "temp_mean_c": round(float(temp_mean_c), 2),
+            "kaynak": "gee-cmip6",
+        }
+    except Exception:
+        return None
+
+
 def _extract_openmeteo_daily(data: Dict[str, Any]) -> Dict[str, List[float]]:
     if not isinstance(data, dict) or data.get("error"):
         return {}
@@ -590,6 +656,10 @@ def _extract_openmeteo_daily(data: Dict[str, Any]) -> Dict[str, List[float]]:
     return {"temps": temps, "rains": rains, "suns": suns}
 
 def fetch_openmeteo_2050(lat: float, lng: float, scenario: str, zone: int) -> Dict[str, float]:
+    gee_data = fetch_gee_cmip6_2050(lat, lng, scenario)
+    if gee_data:
+        return gee_data
+
     base_params = {
         "latitude": lat,
         "longitude": lng,
