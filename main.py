@@ -4,6 +4,7 @@ import hmac
 import hashlib
 import base64
 import json
+import math
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -576,26 +577,123 @@ def ts825_zone_for_province(province: Optional[str]) -> int:
     return TS825_ZONE_BY_PROVINCE.get(province.upper(), 3)
 
 
+
+
+_ee_inited = False
+
+def _init_earth_engine() -> bool:
+    global _ee_inited
+    if _ee_inited:
+        return True
+    try:
+        import ee  # type: ignore
+        if PROJECT_ID:
+            ee.Initialize(project=PROJECT_ID)
+        else:
+            ee.Initialize()
+        _ee_inited = True
+        return True
+    except Exception:
+        return False
+
+
+def fetch_gee_cmip6_2050(lat: float, lng: float, scenario: str) -> Optional[Dict[str, float]]:
+    if not _init_earth_engine():
+        return None
+    try:
+        import ee  # type: ignore
+        point = ee.Geometry.Point([lng, lat])
+        collection = (
+            ee.ImageCollection("NASA/GDDP-CMIP6")
+            .filterDate("2041-01-01", "2050-12-31")
+            .filter(ee.Filter.eq("scenario", scenario))
+            .filter(ee.Filter.eq("model", "MRI-ESM2-0"))
+        )
+
+        tas_k = ee.Number(collection.select("tas").mean().reduceRegion(
+            reducer=ee.Reducer.mean(), geometry=point, scale=27830, maxPixels=1e9
+        ).get("tas"))
+        pr_kg_m2_s = ee.Number(collection.select("pr").mean().reduceRegion(
+            reducer=ee.Reducer.mean(), geometry=point, scale=27830, maxPixels=1e9
+        ).get("pr"))
+        rsds_w_m2 = ee.Number(collection.select("rsds").mean().reduceRegion(
+            reducer=ee.Reducer.mean(), geometry=point, scale=27830, maxPixels=1e9
+        ).get("rsds"))
+
+        out = {
+            "temp_mean_c": tas_k.subtract(273.15),
+            "yagis_mm": pr_kg_m2_s.multiply(86400).multiply(365),
+            "gunes_kwh_m2": rsds_w_m2.multiply(24).multiply(365).divide(1000),
+        }
+        vals = ee.Dictionary(out).getInfo() or {}
+        temp_mean_c = vals.get("temp_mean_c")
+        yagis_mm = vals.get("yagis_mm")
+        gunes_kwh_m2 = vals.get("gunes_kwh_m2")
+        if temp_mean_c is None:
+            return None
+
+        hdd = max(0.0, (18.0 - float(temp_mean_c)) * 365.0)
+        return {
+            "hdd": round(hdd, 1),
+            "yagis_mm": None if yagis_mm is None else round(float(yagis_mm), 1),
+            "gunes_kwh_m2": None if gunes_kwh_m2 is None else round(float(gunes_kwh_m2), 1),
+            "temp_mean_c": round(float(temp_mean_c), 2),
+            "kaynak": "gee-cmip6",
+        }
+    except Exception:
+        return None
+
+
+def _extract_openmeteo_daily(data: Dict[str, Any]) -> Dict[str, List[float]]:
+    if not isinstance(data, dict) or data.get("error"):
+        return {}
+    daily = data.get("daily", {})
+    temps = [float(x) for x in daily.get("temperature_2m_mean", []) if x is not None]
+    rains = [float(x) for x in daily.get("precipitation_sum", []) if x is not None]
+    suns = [float(x) for x in daily.get("shortwave_radiation_sum", []) if x is not None]
+    if not temps:
+        return {}
+    return {"temps": temps, "rains": rains, "suns": suns}
+
 def fetch_openmeteo_2050(lat: float, lng: float, scenario: str, zone: int) -> Dict[str, float]:
-    url = "https://climate-api.open-meteo.com/v1/climate?" + urllib.parse.urlencode({
+    gee_data = fetch_gee_cmip6_2050(lat, lng, scenario)
+    if gee_data:
+        return gee_data
+
+    base_params = {
         "latitude": lat,
         "longitude": lng,
-        "start_date": "2046-01-01",
-        "end_date": "2055-12-31",
-        "models": "MRI_AGCM3_2_S",
+        # Climate API çoğu modelde 2050 üstünü kabul etmiyor; bu yüzden bitiş 2050.
+        "start_date": "2041-01-01",
+        "end_date": "2050-12-31",
         "daily": "temperature_2m_mean,precipitation_sum,shortwave_radiation_sum",
         "scenario": scenario,
-    })
-    req = urllib.request.Request(url, headers={"User-Agent": "chronobuild-climate/1.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=12) as r:
-            data = json.loads(r.read().decode("utf-8"))
-        daily = data.get("daily", {})
-        temps = [float(x) for x in daily.get("temperature_2m_mean", []) if x is not None]
-        rains = [float(x) for x in daily.get("precipitation_sum", []) if x is not None]
-        suns = [float(x) for x in daily.get("shortwave_radiation_sum", []) if x is not None]
-        if not temps:
-            raise ValueError("temperature data missing")
+    }
+
+    attempts = [
+        dict(base_params),
+        dict(base_params, models="MRI_AGCM3_2_S"),
+        dict(base_params, models="MRI_AGCM3-2-S"),
+        dict(base_params, start_date="2046-01-01", end_date="2050-12-31"),
+        dict(base_params, start_date="2050-01-01", end_date="2050-12-31"),
+    ]
+
+    for params in attempts:
+        url = "https://climate-api.open-meteo.com/v1/climate?" + urllib.parse.urlencode(params)
+        req = urllib.request.Request(url, headers={"User-Agent": "chronobuild-climate/1.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=12) as r:
+                data = json.loads(r.read().decode("utf-8"))
+        except Exception:
+            continue
+
+        parsed = _extract_openmeteo_daily(data)
+        if not parsed:
+            continue
+
+        temps = parsed["temps"]
+        rains = parsed["rains"]
+        suns = parsed["suns"]
 
         t_mean = sum(temps) / len(temps)
         yearly_rain = (sum(rains) / max(len(rains), 1)) * 365.0
@@ -609,16 +707,14 @@ def fetch_openmeteo_2050(lat: float, lng: float, scenario: str, zone: int) -> Di
             "temp_mean_c": round(t_mean, 2),
             "kaynak": "open-meteo",
         }
-    except Exception:
-        return {
-            "hdd": None,
-            "yagis_mm": None,
-            "gunes_kwh_m2": None,
-            "temp_mean_c": None,
-            "kaynak": "veri yok",
-        }
 
-
+    return {
+        "hdd": None,
+        "yagis_mm": None,
+        "gunes_kwh_m2": None,
+        "temp_mean_c": None,
+        "kaynak": "veri yok",
+    }
 
 
 def fetch_openmeteo_current(lat: float, lng: float, zone: int) -> Dict[str, float]:
@@ -636,12 +732,12 @@ def fetch_openmeteo_current(lat: float, lng: float, zone: int) -> Dict[str, floa
     try:
         with urllib.request.urlopen(req, timeout=12) as r:
             data = json.loads(r.read().decode("utf-8"))
-        daily = data.get("daily", {})
-        temps = [float(x) for x in daily.get("temperature_2m_mean", []) if x is not None]
-        rains = [float(x) for x in daily.get("precipitation_sum", []) if x is not None]
-        suns = [float(x) for x in daily.get("shortwave_radiation_sum", []) if x is not None]
-        if not temps:
+        parsed = _extract_openmeteo_daily(data)
+        if not parsed:
             raise ValueError("temperature data missing")
+        temps = parsed["temps"]
+        rains = parsed["rains"]
+        suns = parsed["suns"]
         t_mean = sum(temps) / len(temps)
         yearly_rain = sum(rains)
         yearly_sun = sum(suns) / 1000.0
