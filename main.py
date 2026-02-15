@@ -733,6 +733,19 @@ def evaluate_option(option: Dict[str, Any], win: Dict[str, Any], metrics: Dict[s
     }
 
 
+
+
+@app.get("/climate/current")
+def climate_current(lat: float, lng: float):
+    province = province_from_coords(lat, lng)
+    zone = ts825_zone_for_province(province)
+    current = fetch_openmeteo_current(lat, lng, zone)
+    return {
+        "province": province,
+        "zone": zone,
+        "current": current,
+    }
+
 class AnalyzeInput(BaseModel):
     lat: float
     lng: float
@@ -871,6 +884,12 @@ def analyze(inp: AnalyzeInput):
                 "y2050": climate_2050.get("kaynak", "fallback"),
             },
             "current": {
+                "hdd": climate_current["hdd"],
+                "yagis_mm": climate_current["yagis_mm"],
+                "gunes_kwh_m2": climate_current["gunes_kwh_m2"],
+                "temp_mean_c": climate_current["temp_mean_c"],
+            },
+            "guncel": {
                 "hdd": climate_current["hdd"],
                 "yagis_mm": climate_current["yagis_mm"],
                 "gunes_kwh_m2": climate_current["gunes_kwh_m2"],

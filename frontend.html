@@ -190,6 +190,7 @@
 <script>
   const CLOUD_RUN_BASE = "https://mimari-1086796557469.europe-west3.run.app";
   const API_URL = `${CLOUD_RUN_BASE}/analyze`;
+  const CLIMATE_CURRENT_URL = `${CLOUD_RUN_BASE}/climate/current`;
   const map = L.map('map').setView([41.01, 28.97], 6);
   L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png').addTo(map);
   let marker = L.marker([41.01, 28.97], { draggable: true }).addTo(map);
@@ -236,6 +237,17 @@
       });
       if (!response.ok) throw new Error('Sunucu Hatası: ' + response.status);
       const data = await response.json();
+      if (!data?.iklim_info?.current && !data?.iklim_info?.guncel) {
+        try {
+          const q = `?lat=${payload.lat}&lng=${payload.lng}`;
+          const cRes = await fetch(CLIMATE_CURRENT_URL + q);
+          if (cRes.ok) {
+            const cData = await cRes.json();
+            data.iklim_info = data.iklim_info || {};
+            data.iklim_info.current = cData.current;
+          }
+        } catch (_) {}
+      }
       updateUI(data);
     } catch (e) {
       console.warn(e);
@@ -251,21 +263,23 @@
   function updateUI(data) {
     const m = data.mevcut;
     const ai = data.ai_onerisi;
-    const info = data.iklim_info;
+    const info = data.iklim_info || {};
+    const currentClimate = info.current || info.guncel || {};
+    const futureClimate = info.y2050 || {};
 
     document.getElementById('ts-province').innerText = m.province || "-";
     document.getElementById('ts-zone').innerText = (m.ts825_zone ?? "-");
     document.getElementById('ts-umax').innerText = (m.u_wall_max ?? "-");
 
-    document.getElementById('climate-now-hdd').innerText = info.current?.hdd ?? '-';
-    document.getElementById('climate-now-rain').innerText = info.current?.yagis_mm ?? '-';
-    document.getElementById('climate-now-sun').innerText = info.current?.gunes_kwh_m2 ?? '-';
-    document.getElementById('climate-now-temp').innerText = info.current?.temp_mean_c ?? '-';
+    document.getElementById('climate-now-hdd').innerText = currentClimate.hdd ?? '-';
+    document.getElementById('climate-now-rain').innerText = currentClimate.yagis_mm ?? '-';
+    document.getElementById('climate-now-sun').innerText = currentClimate.gunes_kwh_m2 ?? '-';
+    document.getElementById('climate-now-temp').innerText = currentClimate.temp_mean_c ?? '-';
 
-    document.getElementById('climate-fut-hdd').innerText = info.y2050?.hdd ?? '-';
-    document.getElementById('climate-fut-rain').innerText = info.y2050?.yagis_mm ?? '-';
-    document.getElementById('climate-fut-sun').innerText = info.y2050?.gunes_kwh_m2 ?? '-';
-    document.getElementById('climate-fut-temp').innerText = info.y2050?.temp_mean_c ?? '-';
+    document.getElementById('climate-fut-hdd').innerText = futureClimate.hdd ?? '-';
+    document.getElementById('climate-fut-rain').innerText = futureClimate.yagis_mm ?? '-';
+    document.getElementById('climate-fut-sun').innerText = futureClimate.gunes_kwh_m2 ?? '-';
+    document.getElementById('climate-fut-temp').innerText = futureClimate.temp_mean_c ?? '-';
 
     document.getElementById('curr-mat').innerText = `${m.kalinlik_cm}cm ${m.yalitim}`;
     document.getElementById('curr-bill').innerText = `${trInt(m.y2050.yillik_tutar_tl)} TL / yıl`;
