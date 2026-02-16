@@ -191,9 +191,6 @@
   const CLOUD_RUN_BASE = "https://mimari-1086796557469.europe-west3.run.app";
   const API_URL = `${CLOUD_RUN_BASE}/analyze`;
   const CLIMATE_CURRENT_URL = `${CLOUD_RUN_BASE}/climate/current`;
-  const SAME_ORIGIN_BASE = (window.location.origin && window.location.origin.startsWith('http')) ? window.location.origin : CLOUD_RUN_BASE;
-  const API_FALLBACK_URL = `${SAME_ORIGIN_BASE}/analyze`;
-  const CLIMATE_CURRENT_FALLBACK_URL = `${SAME_ORIGIN_BASE}/climate/current`;
   const map = L.map('map').setView([41.01, 28.97], 6);
   L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png').addTo(map);
   let marker = L.marker([41.01, 28.97], { draggable: true }).addTo(map);
@@ -241,32 +238,18 @@
     };
 
     try {
-      async function postAnalyze(url) {
-        return fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-      }
-
-      let response;
-      try {
-        response = await postAnalyze(API_URL);
-      } catch (_) {
-        response = await postAnalyze(API_FALLBACK_URL);
-      }
+      const response = await fetch(API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
 
       if (!response.ok) throw new Error('Sunucu Hatası: ' + response.status);
       const data = await response.json();
       if (!data?.iklim_info?.current && !data?.iklim_info?.guncel) {
         try {
           const q = `?lat=${payload.lat}&lng=${payload.lng}`;
-          let cRes;
-          try {
-            cRes = await fetch(CLIMATE_CURRENT_URL + q);
-          } catch (_) {
-            cRes = await fetch(CLIMATE_CURRENT_FALLBACK_URL + q);
-          }
+          const cRes = await fetch(CLIMATE_CURRENT_URL + q);
           if (cRes.ok) {
             const cData = await cRes.json();
             data.iklim_info = data.iklim_info || {};
@@ -277,7 +260,7 @@
       updateUI(data);
     } catch (e) {
       console.warn(e);
-      alert('Analiz hatası: ' + e.message + `\nAPI: ${API_URL}` + `\nYedek API: ${API_FALLBACK_URL}` + '\nAğ/CORS/servis erişimini kontrol et.');
+      alert('Analiz hatası: ' + e.message + `\nAPI: ${API_URL}` + '\nCloud Run servisinin erişilebilir ve unauthenticated olduğundan emin olun.');
     } finally {
       loader.classList.add('hidden');
       results.classList.remove('hidden');
