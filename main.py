@@ -605,7 +605,7 @@ def fetch_gee_cmip6_2050(lat: float, lng: float, scenario: str) -> Optional[Dict
         point = ee.Geometry.Point([lng, lat])
         collection = (
             ee.ImageCollection("NASA/GDDP-CMIP6")
-            .filterDate("2041-01-01", "2050-12-31")
+            .filterDate("2050-01-01", "2050-12-31")
             .filter(ee.Filter.eq("scenario", scenario))
             .filter(ee.Filter.eq("model", "MRI-ESM2-0"))
         )
@@ -663,8 +663,8 @@ def fetch_openmeteo_2050(lat: float, lng: float, scenario: str, zone: int) -> Di
     base_params = {
         "latitude": lat,
         "longitude": lng,
-        # Climate API çoğu modelde 2050 üstünü kabul etmiyor; bu yüzden bitiş 2050.
-        "start_date": "2041-01-01",
+        # Yalnızca 2050 yılı ortalaması
+        "start_date": "2050-01-01",
         "end_date": "2050-12-31",
         "daily": "temperature_2m_mean,precipitation_sum,shortwave_radiation_sum",
         "scenario": scenario,
@@ -674,8 +674,6 @@ def fetch_openmeteo_2050(lat: float, lng: float, scenario: str, zone: int) -> Di
         dict(base_params),
         dict(base_params, models="MRI_AGCM3_2_S"),
         dict(base_params, models="MRI_AGCM3-2-S"),
-        dict(base_params, start_date="2046-01-01", end_date="2050-12-31"),
-        dict(base_params, start_date="2050-01-01", end_date="2050-12-31"),
     ]
 
     for params in attempts:
@@ -1028,7 +1026,7 @@ def analyze(inp: AnalyzeInput):
         },
         "iklim_info": {
             "senaryo": inp.senaryo,
-            "senaryo_notu": "Senaryolar arası fark ham CMIP6/Open-Meteo çıktısından gelir; veri yoksa değer üretilmez.",
+            "senaryo_notu": "Senaryolar arası fark 2050 yılı ham CMIP6/Open-Meteo verisinden gelir; veri yoksa değer üretilmez.",
             "kaynak": {
                 "current": climate_current.get("kaynak", "veri yok"),
                 "y2050": climate_2050.get("kaynak", "veri yok"),
