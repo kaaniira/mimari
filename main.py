@@ -639,72 +639,18 @@ def fetch_gee_cmip6_2050(lat: float, lng: float, scenario: str) -> Optional[Dict
             "gunes_kwh_m2": None if gunes_kwh_m2 is None else round(float(gunes_kwh_m2), 3),
             "temp_mean_c": round(float(temp_mean_c), 3),
             "kaynak": "gee-cmip6",
+            "senaryo": scenario,
+            "model": "MRI-ESM2-0",
         }
     except Exception:
         return None
 
 
-def _extract_openmeteo_daily(data: Dict[str, Any]) -> Dict[str, List[float]]:
-    if not isinstance(data, dict) or data.get("error"):
-        return {}
-    daily = data.get("daily", {})
-    temps = [float(x) for x in daily.get("temperature_2m_mean", []) if x is not None]
-    rains = [float(x) for x in daily.get("precipitation_sum", []) if x is not None]
-    suns = [float(x) for x in daily.get("shortwave_radiation_sum", []) if x is not None]
-    if not temps:
-        return {}
-    return {"temps": temps, "rains": rains, "suns": suns}
-
-def fetch_openmeteo_2050(lat: float, lng: float, scenario: str, zone: int) -> Dict[str, float]:
+def fetch_gee_2050(lat: float, lng: float, scenario: str, zone: int) -> Dict[str, float]:
+    # Open-Meteo tamamen kaldırıldı; 2050 verisi yalnızca GEE CMIP6'dan alınır.
     gee_data = fetch_gee_cmip6_2050(lat, lng, scenario)
     if gee_data:
         return gee_data
-
-    base_params = {
-        "latitude": lat,
-        "longitude": lng,
-        # Yalnızca 2050 yılı ortalaması
-        "start_date": "2050-01-01",
-        "end_date": "2050-12-31",
-        "daily": "temperature_2m_mean,precipitation_sum,shortwave_radiation_sum",
-        "scenario": scenario,
-    }
-
-    attempts = [
-        dict(base_params),
-        dict(base_params, models="MRI_AGCM3_2_S"),
-        dict(base_params, models="MRI_AGCM3-2-S"),
-    ]
-
-    for params in attempts:
-        url = "https://climate-api.open-meteo.com/v1/climate?" + urllib.parse.urlencode(params)
-        req = urllib.request.Request(url, headers={"User-Agent": "chronobuild-climate/1.0"})
-        try:
-            with urllib.request.urlopen(req, timeout=12) as r:
-                data = json.loads(r.read().decode("utf-8"))
-        except Exception:
-            continue
-
-        parsed = _extract_openmeteo_daily(data)
-        if not parsed:
-            continue
-
-        temps = parsed["temps"]
-        rains = parsed["rains"]
-        suns = parsed["suns"]
-
-        t_mean = sum(temps) / len(temps)
-        yearly_rain = (sum(rains) / max(len(rains), 1)) * 365.0
-        yearly_sun = (sum(suns) / max(len(suns), 1)) * 365.0 / 1000.0
-        hdd = max(0.0, (18.0 - t_mean) * 365.0)
-
-        return {
-            "hdd": round(hdd, 3),
-            "yagis_mm": round(yearly_rain, 3),
-            "gunes_kwh_m2": round(yearly_sun, 3),
-            "temp_mean_c": round(t_mean, 3),
-            "kaynak": "open-meteo",
-        }
 
     return {
         "hdd": None,
@@ -712,40 +658,61 @@ def fetch_openmeteo_2050(lat: float, lng: float, scenario: str, zone: int) -> Di
         "gunes_kwh_m2": None,
         "temp_mean_c": None,
         "kaynak": "veri yok",
+        "senaryo": scenario,
+        "model": None,
     }
 
 
-def fetch_openmeteo_current(lat: float, lng: float, zone: int) -> Dict[str, float]:
-    end = date.today() - timedelta(days=1)
-    start = end - timedelta(days=364)
-    url = "https://archive-api.open-meteo.com/v1/archive?" + urllib.parse.urlencode({
-        "latitude": lat,
-        "longitude": lng,
-        "start_date": start.isoformat(),
-        "end_date": end.isoformat(),
-        "daily": "temperature_2m_mean,precipitation_sum,shortwave_radiation_sum",
-        "timezone": "auto",
-    })
-    req = urllib.request.Request(url, headers={"User-Agent": "chronobuild-climate/1.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=12) as r:
-            data = json.loads(r.read().decode("utf-8"))
-        parsed = _extract_openmeteo_daily(data)
-        if not parsed:
-            raise ValueError("temperature data missing")
-        temps = parsed["temps"]
-        rains = parsed["rains"]
-        suns = parsed["suns"]
-        t_mean = sum(temps) / len(temps)
-        yearly_rain = sum(rains)
-        yearly_sun = sum(suns) / 1000.0
-        hdd = max(0.0, sum(max(0.0, 18.0 - t) for t in temps))
+def fetch_gee_current(lat: float, lng: float, zone: int) -> Dict[str, float]:
+    # Open-Meteo tamamen kaldırıldı; güncel iklim için GEE CMIP6 historical yaklaşımı.
+    if not _init_earth_engine():
         return {
-            "hdd": round(hdd, 1),
-            "yagis_mm": round(yearly_rain, 1),
-            "gunes_kwh_m2": round(yearly_sun, 1),
-            "temp_mean_c": round(t_mean, 2),
-            "kaynak": "open-meteo-archive",
+            "hdd": None,
+            "yagis_mm": None,
+            "gunes_kwh_m2": None,
+            "temp_mean_c": None,
+            "kaynak": "veri yok",
+        }
+
+    try:
+        import ee  # type: ignore
+        point = ee.Geometry.Point([lng, lat])
+        collection = (
+            ee.ImageCollection("NASA/GDDP-CMIP6")
+            .filterDate("2005-01-01", "2014-12-31")
+            .filter(ee.Filter.eq("scenario", "historical"))
+            .filter(ee.Filter.eq("model", "MRI-ESM2-0"))
+        )
+
+        tas_k = ee.Number(collection.select("tas").mean().reduceRegion(
+            reducer=ee.Reducer.mean(), geometry=point, scale=27830, maxPixels=1e9
+        ).get("tas"))
+        pr_kg_m2_s = ee.Number(collection.select("pr").mean().reduceRegion(
+            reducer=ee.Reducer.mean(), geometry=point, scale=27830, maxPixels=1e9
+        ).get("pr"))
+        rsds_w_m2 = ee.Number(collection.select("rsds").mean().reduceRegion(
+            reducer=ee.Reducer.mean(), geometry=point, scale=27830, maxPixels=1e9
+        ).get("rsds"))
+
+        out = {
+            "temp_mean_c": tas_k.subtract(273.15),
+            "yagis_mm": pr_kg_m2_s.multiply(86400).multiply(365),
+            "gunes_kwh_m2": rsds_w_m2.multiply(24).multiply(365).divide(1000),
+        }
+        vals = ee.Dictionary(out).getInfo() or {}
+        temp_mean_c = vals.get("temp_mean_c")
+        yagis_mm = vals.get("yagis_mm")
+        gunes_kwh_m2 = vals.get("gunes_kwh_m2")
+        if temp_mean_c is None:
+            raise ValueError("missing temp")
+
+        hdd = max(0.0, (18.0 - float(temp_mean_c)) * 365.0)
+        return {
+            "hdd": round(hdd, 3),
+            "yagis_mm": None if yagis_mm is None else round(float(yagis_mm), 3),
+            "gunes_kwh_m2": None if gunes_kwh_m2 is None else round(float(gunes_kwh_m2), 3),
+            "temp_mean_c": round(float(temp_mean_c), 3),
+            "kaynak": "gee-cmip6-historical",
         }
     except Exception:
         return {
@@ -756,83 +723,12 @@ def fetch_openmeteo_current(lat: float, lng: float, zone: int) -> Dict[str, floa
             "kaynak": "veri yok",
         }
 
-def round_up_5(cm: float) -> int:
-    cm = max(cm, 5.0)
-    return int(((cm + 4.999) // 5) * 5)
-
-
-def get_windows(cat: Dict[str, Any]) -> List[Dict[str, Any]]:
-    win_map = cat.get("windows", {})
-    out = [dict(v) for v in win_map.values() if v.get("active", True)]
-    if not out:
-        out = [dict(x) for x in DEFAULT_WINDOWS]
-    return out
-
-
-def get_insulations(cat: Dict[str, Any]) -> List[Dict[str, Any]]:
-    ins_map = cat.get("insulations", {})
-    out = [dict(v) for v in ins_map.values() if v.get("active", True)]
-    if not out:
-        out = [dict(x) for x in DEFAULT_INSULATIONS]
-    return out
-
-
-def calc_building_metrics(area_base: float, floors: int, floor_h: float) -> Dict[str, float]:
-    base = max(20.0, area_base)
-    fl = max(1, floors)
-    h = max(2.2, floor_h)
-    perimeter = 4.0 * (base ** 0.5)
-    wall_area = perimeter * fl * h
-    window_area = wall_area * 0.22
-    opaque_area = max(1.0, wall_area - window_area)
-    roof_area = base
-    return {
-        "wall_area_m2": wall_area,
-        "window_area_m2": window_area,
-        "opaque_wall_area_m2": opaque_area,
-        "roof_area_m2": roof_area,
-    }
-
-
-def evaluate_option(option: Dict[str, Any], win: Dict[str, Any], metrics: Dict[str, float], climate: Dict[str, float], gas_price: float, r_base_layers: float) -> Dict[str, float]:
-    lam = float(option["lambda_value"])
-    t_m = float(option["kalinlik_cm"]) / 100.0
-    r_total = max(0.05, r_base_layers + (t_m / lam))
-    u_wall = 1.0 / r_total
-    u_window = float(win.get("u_value", 2.8))
-
-    hdd = float(climate["hdd"])
-    ht = u_wall * metrics["opaque_wall_area_m2"] + u_window * metrics["window_area_m2"]
-    annual_kwh = ht * hdd * 24.0 / 1000.0
-
-    gas_m3 = annual_kwh / (0.90 * 10.64)
-    annual_tl = gas_m3 * gas_price
-    annual_co2 = gas_m3 * 1.90
-
-    ins_vol = metrics["opaque_wall_area_m2"] * t_m
-    insulation_invest = ins_vol * float(option.get("price_m3", 0.0))
-    insulation_emb = ins_vol * float(option.get("carbon_m3", 0.0))
-
-    win_invest = metrics["window_area_m2"] * float(win.get("price_m2", 0.0))
-    win_emb = metrics["window_area_m2"] * float(win.get("carbon_m2", 0.0))
-
-    return {
-        "u_wall": round(u_wall, 3),
-        "yillik_gaz_m3": round(gas_m3, 1),
-        "yillik_tutar_tl": round(annual_tl, 1),
-        "yillik_co2_kg": round(annual_co2, 1),
-        "yatirim_tl": round(insulation_invest + win_invest, 1),
-        "embodied_co2_kg": round(insulation_emb + win_emb, 1),
-    }
-
-
-
 
 @app.get("/climate/current")
 def climate_current(lat: float, lng: float):
     province = province_from_coords(lat, lng)
     zone = ts825_zone_for_province(province)
-    current = fetch_openmeteo_current(lat, lng, zone)
+    current = fetch_gee_current(lat, lng, zone)
     return {
         "province": province,
         "zone": zone,
@@ -883,8 +779,8 @@ def analyze(inp: AnalyzeInput):
         req_t_m = max(0.01, (1.0 / u_wall_max - r_base) * float(ins["lambda_value"]))
         ins["kalinlik_cm"] = round_up_5(req_t_m * 100.0)
 
-    climate_current = fetch_openmeteo_current(inp.lat, inp.lng, zone)
-    climate_2050 = fetch_openmeteo_2050(inp.lat, inp.lng, inp.senaryo, zone)
+    climate_current = fetch_gee_current(inp.lat, inp.lng, zone)
+    climate_2050 = fetch_gee_2050(inp.lat, inp.lng, inp.senaryo, zone)
 
     if climate_2050.get("hdd") is None:
         return {
@@ -933,6 +829,9 @@ def analyze(inp: AnalyzeInput):
                     "current": climate_current.get("kaynak", "veri yok"),
                     "y2050": climate_2050.get("kaynak", "veri yok"),
                 },
+                "istenen_senaryo": inp.senaryo,
+                "kullanilan_senaryo": climate_2050.get("senaryo", inp.senaryo),
+                "kullanilan_model": climate_2050.get("model"),
                 "current": climate_current,
                 "guncel": climate_current,
                 "y2050": climate_2050,
@@ -1026,7 +925,7 @@ def analyze(inp: AnalyzeInput):
         },
         "iklim_info": {
             "senaryo": inp.senaryo,
-            "senaryo_notu": "Senaryolar arası fark 2050 yılı ham CMIP6/Open-Meteo verisinden gelir; veri yoksa değer üretilmez.",
+            "senaryo_notu": "Senaryolar arası fark 2050 yılı ham GEE CMIP6 verisinden gelir; veri yoksa değer üretilmez.",
             "kaynak": {
                 "current": climate_current.get("kaynak", "veri yok"),
                 "y2050": climate_2050.get("kaynak", "veri yok"),
