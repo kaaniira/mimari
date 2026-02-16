@@ -605,7 +605,7 @@ def fetch_gee_cmip6_2050(lat: float, lng: float, scenario: str) -> Optional[Dict
         point = ee.Geometry.Point([lng, lat])
         collection = (
             ee.ImageCollection("NASA/GDDP-CMIP6")
-            .filterDate("2041-01-01", "2050-12-31")
+            .filterDate("2050-01-01", "2050-12-31")
             .filter(ee.Filter.eq("scenario", scenario))
             .filter(ee.Filter.eq("model", "MRI-ESM2-0"))
         )
@@ -634,10 +634,10 @@ def fetch_gee_cmip6_2050(lat: float, lng: float, scenario: str) -> Optional[Dict
 
         hdd = max(0.0, (18.0 - float(temp_mean_c)) * 365.0)
         return {
-            "hdd": round(hdd, 1),
-            "yagis_mm": None if yagis_mm is None else round(float(yagis_mm), 1),
-            "gunes_kwh_m2": None if gunes_kwh_m2 is None else round(float(gunes_kwh_m2), 1),
-            "temp_mean_c": round(float(temp_mean_c), 2),
+            "hdd": round(hdd, 3),
+            "yagis_mm": None if yagis_mm is None else round(float(yagis_mm), 3),
+            "gunes_kwh_m2": None if gunes_kwh_m2 is None else round(float(gunes_kwh_m2), 3),
+            "temp_mean_c": round(float(temp_mean_c), 3),
             "kaynak": "gee-cmip6",
         }
     except Exception:
@@ -663,8 +663,8 @@ def fetch_openmeteo_2050(lat: float, lng: float, scenario: str, zone: int) -> Di
     base_params = {
         "latitude": lat,
         "longitude": lng,
-        # Climate API çoğu modelde 2050 üstünü kabul etmiyor; bu yüzden bitiş 2050.
-        "start_date": "2041-01-01",
+        # Yalnızca 2050 yılı ortalaması
+        "start_date": "2050-01-01",
         "end_date": "2050-12-31",
         "daily": "temperature_2m_mean,precipitation_sum,shortwave_radiation_sum",
         "scenario": scenario,
@@ -674,8 +674,6 @@ def fetch_openmeteo_2050(lat: float, lng: float, scenario: str, zone: int) -> Di
         dict(base_params),
         dict(base_params, models="MRI_AGCM3_2_S"),
         dict(base_params, models="MRI_AGCM3-2-S"),
-        dict(base_params, start_date="2046-01-01", end_date="2050-12-31"),
-        dict(base_params, start_date="2050-01-01", end_date="2050-12-31"),
     ]
 
     for params in attempts:
@@ -701,10 +699,10 @@ def fetch_openmeteo_2050(lat: float, lng: float, scenario: str, zone: int) -> Di
         hdd = max(0.0, (18.0 - t_mean) * 365.0)
 
         return {
-            "hdd": round(hdd, 1),
-            "yagis_mm": round(yearly_rain, 1),
-            "gunes_kwh_m2": round(yearly_sun, 1),
-            "temp_mean_c": round(t_mean, 2),
+            "hdd": round(hdd, 3),
+            "yagis_mm": round(yearly_rain, 3),
+            "gunes_kwh_m2": round(yearly_sun, 3),
+            "temp_mean_c": round(t_mean, 3),
             "kaynak": "open-meteo",
         }
 
@@ -1028,6 +1026,7 @@ def analyze(inp: AnalyzeInput):
         },
         "iklim_info": {
             "senaryo": inp.senaryo,
+            "senaryo_notu": "Senaryolar arası fark 2050 yılı ham CMIP6/Open-Meteo verisinden gelir; veri yoksa değer üretilmez.",
             "kaynak": {
                 "current": climate_current.get("kaynak", "veri yok"),
                 "y2050": climate_2050.get("kaynak", "veri yok"),
