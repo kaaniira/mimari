@@ -639,6 +639,8 @@ def fetch_gee_cmip6_2050(lat: float, lng: float, scenario: str) -> Optional[Dict
             "gunes_kwh_m2": None if gunes_kwh_m2 is None else round(float(gunes_kwh_m2), 3),
             "temp_mean_c": round(float(temp_mean_c), 3),
             "kaynak": "gee-cmip6",
+            "senaryo": scenario,
+            "model": "MRI-ESM2-0",
         }
     except Exception:
         return None
@@ -704,6 +706,8 @@ def fetch_openmeteo_2050(lat: float, lng: float, scenario: str, zone: int) -> Di
             "gunes_kwh_m2": round(yearly_sun, 3),
             "temp_mean_c": round(t_mean, 3),
             "kaynak": "open-meteo",
+            "senaryo": scenario,
+            "model": params.get("models", "default"),
         }
 
     return {
@@ -712,6 +716,8 @@ def fetch_openmeteo_2050(lat: float, lng: float, scenario: str, zone: int) -> Di
         "gunes_kwh_m2": None,
         "temp_mean_c": None,
         "kaynak": "veri yok",
+        "senaryo": scenario,
+        "model": None,
     }
 
 
@@ -933,6 +939,9 @@ def analyze(inp: AnalyzeInput):
                     "current": climate_current.get("kaynak", "veri yok"),
                     "y2050": climate_2050.get("kaynak", "veri yok"),
                 },
+                "istenen_senaryo": inp.senaryo,
+                "kullanilan_senaryo": climate_2050.get("senaryo", inp.senaryo),
+                "kullanilan_model": climate_2050.get("model"),
                 "current": climate_current,
                 "guncel": climate_current,
                 "y2050": climate_2050,
