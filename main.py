@@ -577,6 +577,14 @@ def ts825_zone_for_province(province: Optional[str]) -> int:
     return TS825_ZONE_BY_PROVINCE.get(province.upper(), 3)
 
 
+def round_up_5(value_cm: float) -> int:
+    """Round up thickness (cm) to nearest 5 cm step."""
+    v = float(value_cm or 0)
+    if v <= 0:
+        return 5
+    return int(math.ceil(v / 5.0) * 5)
+
+
 def get_insulations(cat: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Return active insulation list; fallback to defaults when catalog is empty/broken."""
     items = cat.get("insulations") or {}
