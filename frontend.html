@@ -189,9 +189,8 @@
 
 <script>
   const CLOUD_RUN_BASE = "https://mimari-1086796557469.europe-west3.run.app";
-  const SAME_ORIGIN = window.location.origin && window.location.origin.startsWith('http');
-  const API_URL = SAME_ORIGIN ? `${window.location.origin}/analyze` : `${CLOUD_RUN_BASE}/analyze`;
-  const CLIMATE_CURRENT_URL = SAME_ORIGIN ? `${window.location.origin}/climate/current` : `${CLOUD_RUN_BASE}/climate/current`;
+  const API_URL = `${CLOUD_RUN_BASE}/analyze`;
+  const CLIMATE_CURRENT_URL = `${CLOUD_RUN_BASE}/climate/current`;
   const map = L.map('map').setView([41.01, 28.97], 6);
   L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png').addTo(map);
   let marker = L.marker([41.01, 28.97], { draggable: true }).addTo(map);
