@@ -577,6 +577,56 @@ def ts825_zone_for_province(province: Optional[str]) -> int:
     return TS825_ZONE_BY_PROVINCE.get(province.upper(), 3)
 
 
+def get_insulations(cat: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return active insulation list; fallback to defaults when catalog is empty/broken."""
+    items = cat.get("insulations") or {}
+    src = items.values() if isinstance(items, dict) else items
+
+    out: List[Dict[str, Any]] = []
+    for raw in src:
+        if not isinstance(raw, dict) or not raw.get("active", True):
+            continue
+        name = str(raw.get("name", "")).strip()
+        lam = raw.get("lambda_value")
+        if not name or lam in (None, ""):
+            continue
+        out.append({
+            "name": name,
+            "lambda_value": float(lam),
+            "price_m3": float(raw.get("price_m3", 0) or 0),
+            "carbon_m3": float(raw.get("carbon_m3", 0) or 0),
+        })
+
+    if not out:
+        out = [dict(x) for x in DEFAULT_INSULATIONS if x.get("active", True)]
+
+    return out
+
+
+def get_windows(cat: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return active window list; fallback to defaults when catalog is empty/broken."""
+    items = cat.get("windows") or {}
+    src = items.values() if isinstance(items, dict) else items
+
+    out: List[Dict[str, Any]] = []
+    for raw in src:
+        if not isinstance(raw, dict) or not raw.get("active", True):
+            continue
+        name = str(raw.get("name", "")).strip()
+        u_val = raw.get("u_value")
+        if not name or u_val in (None, ""):
+            continue
+        out.append({
+            "name": name,
+            "u_value": float(u_val),
+            "price_m2": float(raw.get("price_m2", 0) or 0),
+            "carbon_m2": float(raw.get("carbon_m2", 0) or 0),
+        })
+
+    if not out:
+        out = [dict(x) for x in DEFAULT_WINDOWS if x.get("active", True)]
+
+    return out
 
 
 _ee_inited = False
