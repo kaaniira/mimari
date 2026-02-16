@@ -189,8 +189,9 @@
 
 <script>
   const CLOUD_RUN_BASE = "https://mimari-1086796557469.europe-west3.run.app";
-  const API_URL = `${CLOUD_RUN_BASE}/analyze`;
-  const CLIMATE_CURRENT_URL = `${CLOUD_RUN_BASE}/climate/current`;
+  const SAME_ORIGIN = window.location.origin && window.location.origin.startsWith('http');
+  const API_URL = SAME_ORIGIN ? `${window.location.origin}/analyze` : `${CLOUD_RUN_BASE}/analyze`;
+  const CLIMATE_CURRENT_URL = SAME_ORIGIN ? `${window.location.origin}/climate/current` : `${CLOUD_RUN_BASE}/climate/current`;
   const map = L.map('map').setView([41.01, 28.97], 6);
   L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png').addTo(map);
   let marker = L.marker([41.01, 28.97], { draggable: true }).addTo(map);
@@ -259,7 +260,7 @@
       updateUI(data);
     } catch (e) {
       console.warn(e);
-      alert('Analiz hatası: ' + e.message);
+      alert('Analiz hatası: ' + e.message + `\nAPI: ${API_URL}` + '\nAğ/CORS/servis erişimini kontrol et.');
     } finally {
       loader.classList.add('hidden');
       results.classList.remove('hidden');
