@@ -638,9 +638,21 @@ def get_windows(cat: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 _ee_inited = False
+_ee_last_error: Optional[str] = None
+
+
+def _set_ee_error(exc: Exception):
+    global _ee_last_error
+    _ee_last_error = f"{exc.__class__.__name__}: {exc}"
+
+
+def _get_ee_error() -> Optional[str]:
+    return _ee_last_error
+
+
 
 def _init_earth_engine() -> bool:
-    global _ee_inited
+    global _ee_inited, _ee_last_error
     if _ee_inited:
         return True
     try:
@@ -650,8 +662,10 @@ def _init_earth_engine() -> bool:
         else:
             ee.Initialize()
         _ee_inited = True
+        _ee_last_error = None
         return True
-    except Exception:
+    except Exception as exc:
+        _set_ee_error(exc)
         return False
 
 
@@ -700,7 +714,8 @@ def fetch_gee_cmip6_2050(lat: float, lng: float, scenario: str) -> Optional[Dict
             "senaryo": scenario,
             "model": "MRI-ESM2-0",
         }
-    except Exception:
+    except Exception as exc:
+        _set_ee_error(exc)
         return None
 
 
@@ -716,6 +731,7 @@ def fetch_gee_2050(lat: float, lng: float, scenario: str, zone: int) -> Dict[str
         "gunes_kwh_m2": None,
         "temp_mean_c": None,
         "kaynak": "veri yok",
+        "hata": _get_ee_error(),
         "senaryo": scenario,
         "model": None,
     }
@@ -730,6 +746,7 @@ def fetch_gee_current(lat: float, lng: float, zone: int) -> Dict[str, float]:
             "gunes_kwh_m2": None,
             "temp_mean_c": None,
             "kaynak": "veri yok",
+            "hata": _get_ee_error(),
         }
 
     try:
@@ -779,7 +796,65 @@ def fetch_gee_current(lat: float, lng: float, zone: int) -> Dict[str, float]:
             "gunes_kwh_m2": None,
             "temp_mean_c": None,
             "kaynak": "veri yok",
+            "hata": _get_ee_error(),
         }
+
+
+def calc_building_metrics(taban_alani: float, kat_sayisi: int, kat_yuksekligi: float) -> Dict[str, float]:
+    """Simple geometric approximation for wall/window/roof areas."""
+    base = max(20.0, float(taban_alani or 120.0))
+    floors = max(1, int(kat_sayisi or 1))
+    h = max(2.4, float(kat_yuksekligi or 2.8))
+
+    side = math.sqrt(base)
+    perimeter = 4.0 * side
+    gross_wall = perimeter * (floors * h)
+    window_ratio = 0.20
+    window_area = gross_wall * window_ratio
+    net_wall = max(1.0, gross_wall - window_area)
+
+    return {
+        "base_area_m2": round(base, 3),
+        "total_floor_area_m2": round(base * floors, 3),
+        "roof_area_m2": round(base, 3),
+        "wall_area_m2": round(net_wall, 3),
+        "window_area_m2": round(window_area, 3),
+    }
+
+
+def evaluate_option(ins: Dict[str, Any], win: Dict[str, Any], metrics: Dict[str, float], climate_2050: Dict[str, float], gas_price: float, r_base: float) -> Dict[str, float]:
+    """Evaluate one insulation + window option with coarse engineering assumptions."""
+    wall_area = float(metrics["wall_area_m2"])
+    window_area = float(metrics["window_area_m2"])
+    hdd = float(climate_2050.get("hdd", 0) or 0)
+
+    lam = max(0.01, float(ins.get("lambda_value", 0.04) or 0.04))
+    t_cm = max(1.0, float(ins.get("kalinlik_cm", 5) or 5))
+    t_m = t_cm / 100.0
+    u_wall = 1.0 / max(0.05, float(r_base) + (t_m / lam))
+
+    u_win = max(0.8, float(win.get("u_value", 2.8) or 2.8))
+
+    ua = u_wall * wall_area + u_win * window_area
+    annual_heat_kwh = ua * hdd * 24.0 / 1000.0
+
+    system_eff = 0.90
+    kwh_per_m3 = 9.5
+    yillik_gaz_m3 = max(0.0, annual_heat_kwh / (kwh_per_m3 * system_eff))
+    yillik_tutar_tl = yillik_gaz_m3 * max(0.0, float(gas_price or 0))
+    yillik_co2_kg = yillik_gaz_m3 * 1.90
+
+    ins_volume_m3 = wall_area * t_m
+    yatirim_tl = ins_volume_m3 * float(ins.get("price_m3", 0) or 0) + window_area * float(win.get("price_m2", 0) or 0)
+    embodied_co2_kg = ins_volume_m3 * float(ins.get("carbon_m3", 0) or 0) + window_area * float(win.get("carbon_m2", 0) or 0)
+
+    return {
+        "yillik_gaz_m3": round(yillik_gaz_m3, 1),
+        "yillik_tutar_tl": round(yillik_tutar_tl, 1),
+        "yillik_co2_kg": round(yillik_co2_kg, 1),
+        "yatirim_tl": round(yatirim_tl, 1),
+        "embodied_co2_kg": round(embodied_co2_kg, 1),
+    }
 
 
 @app.get("/climate/current")
@@ -890,6 +965,7 @@ def analyze(inp: AnalyzeInput):
                 "istenen_senaryo": inp.senaryo,
                 "kullanilan_senaryo": climate_2050.get("senaryo", inp.senaryo),
                 "kullanilan_model": climate_2050.get("model"),
+                "gee_hata": climate_2050.get("hata") or climate_current.get("hata"),
                 "current": climate_current,
                 "guncel": climate_current,
                 "y2050": climate_2050,
@@ -988,6 +1064,7 @@ def analyze(inp: AnalyzeInput):
                 "current": climate_current.get("kaynak", "veri yok"),
                 "y2050": climate_2050.get("kaynak", "veri yok"),
             },
+            "gee_hata": climate_2050.get("hata") or climate_current.get("hata"),
             "current": {
                 "hdd": climate_current["hdd"],
                 "yagis_mm": climate_current["yagis_mm"],
