@@ -704,33 +704,60 @@ def fetch_gee_cmip6_2050(lat: float, lng: float, scenario: str) -> Optional[Dict
         return None
 
 
+CLIMATE_DEFAULT_BY_ZONE = {
+    1: {"temp_mean_c": 17.0, "yagis_mm": 700.0, "gunes_kwh_m2": 1750.0},
+    2: {"temp_mean_c": 14.0, "yagis_mm": 750.0, "gunes_kwh_m2": 1550.0},
+    3: {"temp_mean_c": 11.0, "yagis_mm": 600.0, "gunes_kwh_m2": 1450.0},
+    4: {"temp_mean_c": 7.0, "yagis_mm": 500.0, "gunes_kwh_m2": 1350.0},
+}
+
+SCENARIO_TEMP_DELTA = {"ssp245": 2.0, "ssp370": 2.8, "ssp585": 3.6}
+SCENARIO_RAIN_FACTOR = {"ssp245": 0.98, "ssp370": 0.95, "ssp585": 0.92}
+SCENARIO_SUN_FACTOR = {"ssp245": 1.02, "ssp370": 1.03, "ssp585": 1.04}
+
+
+def fallback_current_climate(zone: int) -> Dict[str, float]:
+    base = CLIMATE_DEFAULT_BY_ZONE.get(zone, CLIMATE_DEFAULT_BY_ZONE[3])
+    temp = float(base["temp_mean_c"])
+    return {
+        "hdd": round(max(0.0, (18.0 - temp) * 365.0), 3),
+        "yagis_mm": round(float(base["yagis_mm"]), 3),
+        "gunes_kwh_m2": round(float(base["gunes_kwh_m2"]), 3),
+        "temp_mean_c": round(temp, 3),
+        "kaynak": "zone-default-current",
+    }
+
+
+def fallback_2050_climate(zone: int, scenario: str) -> Dict[str, float]:
+    base = CLIMATE_DEFAULT_BY_ZONE.get(zone, CLIMATE_DEFAULT_BY_ZONE[3])
+    s = (scenario or "ssp245").lower()
+    temp = float(base["temp_mean_c"]) + float(SCENARIO_TEMP_DELTA.get(s, 2.0))
+    rain = float(base["yagis_mm"]) * float(SCENARIO_RAIN_FACTOR.get(s, 0.98))
+    sun = float(base["gunes_kwh_m2"]) * float(SCENARIO_SUN_FACTOR.get(s, 1.02))
+    return {
+        "hdd": round(max(0.0, (18.0 - temp) * 365.0), 3),
+        "yagis_mm": round(rain, 3),
+        "gunes_kwh_m2": round(sun, 3),
+        "temp_mean_c": round(temp, 3),
+        "kaynak": "zone-default-2050",
+        "senaryo": s,
+        "model": None,
+    }
+
+
 def fetch_gee_2050(lat: float, lng: float, scenario: str, zone: int) -> Dict[str, float]:
     # Open-Meteo tamamen kaldırıldı; 2050 verisi yalnızca GEE CMIP6'dan alınır.
     gee_data = fetch_gee_cmip6_2050(lat, lng, scenario)
     if gee_data:
         return gee_data
 
-    return {
-        "hdd": None,
-        "yagis_mm": None,
-        "gunes_kwh_m2": None,
-        "temp_mean_c": None,
-        "kaynak": "veri yok",
-        "senaryo": scenario,
-        "model": None,
-    }
+    return fallback_2050_climate(zone, scenario)
 
 
 def fetch_gee_current(lat: float, lng: float, zone: int) -> Dict[str, float]:
     # Open-Meteo tamamen kaldırıldı; güncel iklim için GEE CMIP6 historical yaklaşımı.
     if not _init_earth_engine():
-        return {
-            "hdd": None,
-            "yagis_mm": None,
-            "gunes_kwh_m2": None,
-            "temp_mean_c": None,
-            "kaynak": "veri yok",
-        }
+        return fallback_current_climate(zone)
 
     try:
         import ee  # type: ignore
@@ -773,13 +800,64 @@ def fetch_gee_current(lat: float, lng: float, zone: int) -> Dict[str, float]:
             "kaynak": "gee-cmip6-historical",
         }
     except Exception:
-        return {
-            "hdd": None,
-            "yagis_mm": None,
-            "gunes_kwh_m2": None,
-            "temp_mean_c": None,
-            "kaynak": "veri yok",
-        }
+        return fallback_current_climate(zone)
+
+
+def calc_building_metrics(taban_alani: float, kat_sayisi: int, kat_yuksekligi: float) -> Dict[str, float]:
+    """Simple geometric approximation for wall/window/roof areas."""
+    base = max(20.0, float(taban_alani or 120.0))
+    floors = max(1, int(kat_sayisi or 1))
+    h = max(2.4, float(kat_yuksekligi or 2.8))
+
+    side = math.sqrt(base)
+    perimeter = 4.0 * side
+    gross_wall = perimeter * (floors * h)
+    window_ratio = 0.20
+    window_area = gross_wall * window_ratio
+    net_wall = max(1.0, gross_wall - window_area)
+
+    return {
+        "base_area_m2": round(base, 3),
+        "total_floor_area_m2": round(base * floors, 3),
+        "roof_area_m2": round(base, 3),
+        "wall_area_m2": round(net_wall, 3),
+        "window_area_m2": round(window_area, 3),
+    }
+
+
+def evaluate_option(ins: Dict[str, Any], win: Dict[str, Any], metrics: Dict[str, float], climate_2050: Dict[str, float], gas_price: float, r_base: float) -> Dict[str, float]:
+    """Evaluate one insulation + window option with coarse engineering assumptions."""
+    wall_area = float(metrics["wall_area_m2"])
+    window_area = float(metrics["window_area_m2"])
+    hdd = float(climate_2050.get("hdd", 0) or 0)
+
+    lam = max(0.01, float(ins.get("lambda_value", 0.04) or 0.04))
+    t_cm = max(1.0, float(ins.get("kalinlik_cm", 5) or 5))
+    t_m = t_cm / 100.0
+    u_wall = 1.0 / max(0.05, float(r_base) + (t_m / lam))
+
+    u_win = max(0.8, float(win.get("u_value", 2.8) or 2.8))
+
+    ua = u_wall * wall_area + u_win * window_area
+    annual_heat_kwh = ua * hdd * 24.0 / 1000.0
+
+    system_eff = 0.90
+    kwh_per_m3 = 9.5
+    yillik_gaz_m3 = max(0.0, annual_heat_kwh / (kwh_per_m3 * system_eff))
+    yillik_tutar_tl = yillik_gaz_m3 * max(0.0, float(gas_price or 0))
+    yillik_co2_kg = yillik_gaz_m3 * 1.90
+
+    ins_volume_m3 = wall_area * t_m
+    yatirim_tl = ins_volume_m3 * float(ins.get("price_m3", 0) or 0) + window_area * float(win.get("price_m2", 0) or 0)
+    embodied_co2_kg = ins_volume_m3 * float(ins.get("carbon_m3", 0) or 0) + window_area * float(win.get("carbon_m2", 0) or 0)
+
+    return {
+        "yillik_gaz_m3": round(yillik_gaz_m3, 1),
+        "yillik_tutar_tl": round(yillik_tutar_tl, 1),
+        "yillik_co2_kg": round(yillik_co2_kg, 1),
+        "yatirim_tl": round(yatirim_tl, 1),
+        "embodied_co2_kg": round(embodied_co2_kg, 1),
+    }
 
 
 @app.get("/climate/current")
