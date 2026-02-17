@@ -704,60 +704,33 @@ def fetch_gee_cmip6_2050(lat: float, lng: float, scenario: str) -> Optional[Dict
         return None
 
 
-CLIMATE_DEFAULT_BY_ZONE = {
-    1: {"temp_mean_c": 17.0, "yagis_mm": 700.0, "gunes_kwh_m2": 1750.0},
-    2: {"temp_mean_c": 14.0, "yagis_mm": 750.0, "gunes_kwh_m2": 1550.0},
-    3: {"temp_mean_c": 11.0, "yagis_mm": 600.0, "gunes_kwh_m2": 1450.0},
-    4: {"temp_mean_c": 7.0, "yagis_mm": 500.0, "gunes_kwh_m2": 1350.0},
-}
-
-SCENARIO_TEMP_DELTA = {"ssp245": 2.0, "ssp370": 2.8, "ssp585": 3.6}
-SCENARIO_RAIN_FACTOR = {"ssp245": 0.98, "ssp370": 0.95, "ssp585": 0.92}
-SCENARIO_SUN_FACTOR = {"ssp245": 1.02, "ssp370": 1.03, "ssp585": 1.04}
-
-
-def fallback_current_climate(zone: int) -> Dict[str, float]:
-    base = CLIMATE_DEFAULT_BY_ZONE.get(zone, CLIMATE_DEFAULT_BY_ZONE[3])
-    temp = float(base["temp_mean_c"])
-    return {
-        "hdd": round(max(0.0, (18.0 - temp) * 365.0), 3),
-        "yagis_mm": round(float(base["yagis_mm"]), 3),
-        "gunes_kwh_m2": round(float(base["gunes_kwh_m2"]), 3),
-        "temp_mean_c": round(temp, 3),
-        "kaynak": "zone-default-current",
-    }
-
-
-def fallback_2050_climate(zone: int, scenario: str) -> Dict[str, float]:
-    base = CLIMATE_DEFAULT_BY_ZONE.get(zone, CLIMATE_DEFAULT_BY_ZONE[3])
-    s = (scenario or "ssp245").lower()
-    temp = float(base["temp_mean_c"]) + float(SCENARIO_TEMP_DELTA.get(s, 2.0))
-    rain = float(base["yagis_mm"]) * float(SCENARIO_RAIN_FACTOR.get(s, 0.98))
-    sun = float(base["gunes_kwh_m2"]) * float(SCENARIO_SUN_FACTOR.get(s, 1.02))
-    return {
-        "hdd": round(max(0.0, (18.0 - temp) * 365.0), 3),
-        "yagis_mm": round(rain, 3),
-        "gunes_kwh_m2": round(sun, 3),
-        "temp_mean_c": round(temp, 3),
-        "kaynak": "zone-default-2050",
-        "senaryo": s,
-        "model": None,
-    }
-
-
 def fetch_gee_2050(lat: float, lng: float, scenario: str, zone: int) -> Dict[str, float]:
     # Open-Meteo tamamen kaldırıldı; 2050 verisi yalnızca GEE CMIP6'dan alınır.
     gee_data = fetch_gee_cmip6_2050(lat, lng, scenario)
     if gee_data:
         return gee_data
 
-    return fallback_2050_climate(zone, scenario)
+    return {
+        "hdd": None,
+        "yagis_mm": None,
+        "gunes_kwh_m2": None,
+        "temp_mean_c": None,
+        "kaynak": "veri yok",
+        "senaryo": scenario,
+        "model": None,
+    }
 
 
 def fetch_gee_current(lat: float, lng: float, zone: int) -> Dict[str, float]:
     # Open-Meteo tamamen kaldırıldı; güncel iklim için GEE CMIP6 historical yaklaşımı.
     if not _init_earth_engine():
-        return fallback_current_climate(zone)
+        return {
+            "hdd": None,
+            "yagis_mm": None,
+            "gunes_kwh_m2": None,
+            "temp_mean_c": None,
+            "kaynak": "veri yok",
+        }
 
     try:
         import ee  # type: ignore
@@ -800,7 +773,13 @@ def fetch_gee_current(lat: float, lng: float, zone: int) -> Dict[str, float]:
             "kaynak": "gee-cmip6-historical",
         }
     except Exception:
-        return fallback_current_climate(zone)
+        return {
+            "hdd": None,
+            "yagis_mm": None,
+            "gunes_kwh_m2": None,
+            "temp_mean_c": None,
+            "kaynak": "veri yok",
+        }
 
 
 def calc_building_metrics(taban_alani: float, kat_sayisi: int, kat_yuksekligi: float) -> Dict[str, float]:
