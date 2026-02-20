@@ -703,51 +703,56 @@ def _init_earth_engine() -> bool:
         return False
 
 
+GEE_MODEL_CANDIDATES = [
+    "MRI-ESM2-0",
+    "IPSL-CM6A-LR",
+    "MIROC6",
+    "CNRM-CM6-1",
+    "GFDL-ESM4",
+]
+
+
 def fetch_gee_cmip6_2050(lat: float, lng: float, scenario: str) -> Optional[Dict[str, float]]:
     if not _init_earth_engine():
         return None
     try:
         import ee  # type: ignore
         point = ee.Geometry.Point([lng, lat])
-        collection = (
+        scn = (scenario or "ssp245").lower()
+
+        base = (
             ee.ImageCollection("NASA/GDDP-CMIP6")
             .filterDate("2050-01-01", "2050-12-31")
-            .filter(ee.Filter.eq("scenario", scenario))
-            .filter(ee.Filter.eq("model", "MRI-ESM2-0"))
+            .filter(ee.Filter.eq("scenario", scn))
         )
 
-        tas_k = ee.Number(collection.select("tas").mean().reduceRegion(
-            reducer=ee.Reducer.mean(), geometry=point, scale=27830, maxPixels=1e9
-        ).get("tas"))
-        pr_kg_m2_s = ee.Number(collection.select("pr").mean().reduceRegion(
-            reducer=ee.Reducer.mean(), geometry=point, scale=27830, maxPixels=1e9
-        ).get("pr"))
-        rsds_w_m2 = ee.Number(collection.select("rsds").mean().reduceRegion(
-            reducer=ee.Reducer.mean(), geometry=point, scale=27830, maxPixels=1e9
-        ).get("rsds"))
+        for model in GEE_MODEL_CANDIDATES + [None]:
+            coll = base.filter(ee.Filter.eq("model", model)) if model else base
+            img = coll.select(["tas", "pr", "rsds"]).mean()
+            vals = img.reduceRegion(
+                reducer=ee.Reducer.mean(), geometry=point, scale=27830, maxPixels=1e9
+            ).getInfo() or {}
 
-        out = {
-            "temp_mean_c": tas_k.subtract(273.15),
-            "yagis_mm": pr_kg_m2_s.multiply(86400).multiply(365),
-            "gunes_kwh_m2": rsds_w_m2.multiply(24).multiply(365).divide(1000),
-        }
-        vals = ee.Dictionary(out).getInfo() or {}
-        temp_mean_c = vals.get("temp_mean_c")
-        yagis_mm = vals.get("yagis_mm")
-        gunes_kwh_m2 = vals.get("gunes_kwh_m2")
-        if temp_mean_c is None:
-            return None
+            tas_k = vals.get("tas")
+            if tas_k is None:
+                continue
 
-        hdd = max(0.0, (18.0 - float(temp_mean_c)) * 365.0)
-        return {
-            "hdd": round(hdd, 3),
-            "yagis_mm": None if yagis_mm is None else round(float(yagis_mm), 3),
-            "gunes_kwh_m2": None if gunes_kwh_m2 is None else round(float(gunes_kwh_m2), 3),
-            "temp_mean_c": round(float(temp_mean_c), 3),
-            "kaynak": "gee-cmip6",
-            "senaryo": scenario,
-            "model": "MRI-ESM2-0",
-        }
+            pr_kg_m2_s = vals.get("pr")
+            rsds_w_m2 = vals.get("rsds")
+            temp_mean_c = float(tas_k) - 273.15
+            hdd = max(0.0, (18.0 - temp_mean_c) * 365.0)
+            return {
+                "hdd": round(hdd, 3),
+                "yagis_mm": None if pr_kg_m2_s is None else round(float(pr_kg_m2_s) * 86400 * 365, 3),
+                "gunes_kwh_m2": None if rsds_w_m2 is None else round(float(rsds_w_m2) * 24 * 365 / 1000, 3),
+                "temp_mean_c": round(temp_mean_c, 3),
+                "kaynak": "gee-cmip6",
+                "senaryo": scn,
+                "model": model or "ENSEMBLE_MEAN",
+            }
+
+        _set_ee_error(RuntimeError(f"GEE reduceRegion sonucu bos (tas yok), scenario={scn}"))
+        return None
     except Exception as exc:
         _set_ee_error(exc)
         return None
@@ -788,44 +793,47 @@ def fetch_gee_current(lat: float, lng: float, zone: int) -> Dict[str, float]:
     try:
         import ee  # type: ignore
         point = ee.Geometry.Point([lng, lat])
-        collection = (
+        base = (
             ee.ImageCollection("NASA/GDDP-CMIP6")
             .filterDate("2005-01-01", "2014-12-31")
             .filter(ee.Filter.eq("scenario", "historical"))
-            .filter(ee.Filter.eq("model", "MRI-ESM2-0"))
         )
 
-        tas_k = ee.Number(collection.select("tas").mean().reduceRegion(
-            reducer=ee.Reducer.mean(), geometry=point, scale=27830, maxPixels=1e9
-        ).get("tas"))
-        pr_kg_m2_s = ee.Number(collection.select("pr").mean().reduceRegion(
-            reducer=ee.Reducer.mean(), geometry=point, scale=27830, maxPixels=1e9
-        ).get("pr"))
-        rsds_w_m2 = ee.Number(collection.select("rsds").mean().reduceRegion(
-            reducer=ee.Reducer.mean(), geometry=point, scale=27830, maxPixels=1e9
-        ).get("rsds"))
+        for model in GEE_MODEL_CANDIDATES + [None]:
+            coll = base.filter(ee.Filter.eq("model", model)) if model else base
+            img = coll.select(["tas", "pr", "rsds"]).mean()
+            vals = img.reduceRegion(
+                reducer=ee.Reducer.mean(), geometry=point, scale=27830, maxPixels=1e9
+            ).getInfo() or {}
 
-        out = {
-            "temp_mean_c": tas_k.subtract(273.15),
-            "yagis_mm": pr_kg_m2_s.multiply(86400).multiply(365),
-            "gunes_kwh_m2": rsds_w_m2.multiply(24).multiply(365).divide(1000),
-        }
-        vals = ee.Dictionary(out).getInfo() or {}
-        temp_mean_c = vals.get("temp_mean_c")
-        yagis_mm = vals.get("yagis_mm")
-        gunes_kwh_m2 = vals.get("gunes_kwh_m2")
-        if temp_mean_c is None:
-            raise ValueError("missing temp")
+            tas_k = vals.get("tas")
+            if tas_k is None:
+                continue
 
-        hdd = max(0.0, (18.0 - float(temp_mean_c)) * 365.0)
+            pr_kg_m2_s = vals.get("pr")
+            rsds_w_m2 = vals.get("rsds")
+            temp_mean_c = float(tas_k) - 273.15
+            hdd = max(0.0, (18.0 - temp_mean_c) * 365.0)
+            return {
+                "hdd": round(hdd, 3),
+                "yagis_mm": None if pr_kg_m2_s is None else round(float(pr_kg_m2_s) * 86400 * 365, 3),
+                "gunes_kwh_m2": None if rsds_w_m2 is None else round(float(rsds_w_m2) * 24 * 365 / 1000, 3),
+                "temp_mean_c": round(temp_mean_c, 3),
+                "kaynak": "gee-cmip6-historical",
+                "model": model or "ENSEMBLE_MEAN",
+            }
+
         return {
-            "hdd": round(hdd, 3),
-            "yagis_mm": None if yagis_mm is None else round(float(yagis_mm), 3),
-            "gunes_kwh_m2": None if gunes_kwh_m2 is None else round(float(gunes_kwh_m2), 3),
-            "temp_mean_c": round(float(temp_mean_c), 3),
-            "kaynak": "gee-cmip6-historical",
+            "hdd": None,
+            "yagis_mm": None,
+            "gunes_kwh_m2": None,
+            "temp_mean_c": None,
+            "kaynak": "veri yok",
+            "hata": "EEException: GEE reduceRegion sonucu bos (tas yok).",
+            "project_id": _resolve_project_id(),
         }
-    except Exception:
+    except Exception as exc:
+        _set_ee_error(exc)
         return {
             "hdd": None,
             "yagis_mm": None,
