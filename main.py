@@ -19,7 +19,13 @@ from pydantic import BaseModel, Field
 from google.cloud import firestore
 
 # -------------------- CONFIG --------------------
-PROJECT_ID = os.environ.get("PROJECT_ID", "").strip() or None
+PROJECT_ID = (
+    os.environ.get("PROJECT_ID", "").strip()
+    or os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
+    or os.environ.get("GCP_PROJECT", "").strip()
+    or os.environ.get("GCLOUD_PROJECT", "").strip()
+    or None
+)
 
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin").strip()
 ADMIN_PASS = os.environ.get("ADMIN_PASS", "").strip()
