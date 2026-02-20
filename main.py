@@ -27,6 +27,8 @@ PROJECT_ID = (
     or None
 )
 
+DETECTED_PROJECT_ID: Optional[str] = None
+
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin").strip()
 ADMIN_PASS = os.environ.get("ADMIN_PASS", "").strip()
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "").strip()  # MUST set!
@@ -656,6 +658,31 @@ def _get_ee_error() -> Optional[str]:
     return _ee_last_error
 
 
+def _resolve_project_id() -> Optional[str]:
+    global DETECTED_PROJECT_ID
+    if DETECTED_PROJECT_ID:
+        return DETECTED_PROJECT_ID
+    if PROJECT_ID:
+        DETECTED_PROJECT_ID = PROJECT_ID
+        return DETECTED_PROJECT_ID
+
+    # Cloud Run metadata fallback
+    try:
+        req = urllib.request.Request(
+            "http://metadata.google.internal/computeMetadata/v1/project/project-id",
+            headers={"Metadata-Flavor": "Google"},
+        )
+        with urllib.request.urlopen(req, timeout=2) as r:
+            pid = r.read().decode("utf-8").strip()
+            if pid:
+                DETECTED_PROJECT_ID = pid
+                return DETECTED_PROJECT_ID
+    except Exception:
+        pass
+
+    return None
+
+
 
 def _init_earth_engine() -> bool:
     global _ee_inited, _ee_last_error
@@ -663,8 +690,9 @@ def _init_earth_engine() -> bool:
         return True
     try:
         import ee  # type: ignore
-        if PROJECT_ID:
-            ee.Initialize(project=PROJECT_ID)
+        pid = _resolve_project_id()
+        if pid:
+            ee.Initialize(project=pid)
         else:
             ee.Initialize()
         _ee_inited = True
@@ -738,6 +766,7 @@ def fetch_gee_2050(lat: float, lng: float, scenario: str, zone: int) -> Dict[str
         "temp_mean_c": None,
         "kaynak": "veri yok",
         "hata": _get_ee_error(),
+        "project_id": _resolve_project_id(),
         "senaryo": scenario,
         "model": None,
     }
@@ -753,6 +782,7 @@ def fetch_gee_current(lat: float, lng: float, zone: int) -> Dict[str, float]:
             "temp_mean_c": None,
             "kaynak": "veri yok",
             "hata": _get_ee_error(),
+            "project_id": _resolve_project_id(),
         }
 
     try:
@@ -803,6 +833,7 @@ def fetch_gee_current(lat: float, lng: float, zone: int) -> Dict[str, float]:
             "temp_mean_c": None,
             "kaynak": "veri yok",
             "hata": _get_ee_error(),
+            "project_id": _resolve_project_id(),
         }
 
 
@@ -972,6 +1003,7 @@ def analyze(inp: AnalyzeInput):
                 "kullanilan_senaryo": climate_2050.get("senaryo", inp.senaryo),
                 "kullanilan_model": climate_2050.get("model"),
                 "gee_hata": climate_2050.get("hata") or climate_current.get("hata"),
+                "gee_project_id": climate_2050.get("project_id") or climate_current.get("project_id") or _resolve_project_id(),
                 "current": climate_current,
                 "guncel": climate_current,
                 "y2050": climate_2050,
@@ -1071,6 +1103,7 @@ def analyze(inp: AnalyzeInput):
                 "y2050": climate_2050.get("kaynak", "veri yok"),
             },
             "gee_hata": climate_2050.get("hata") or climate_current.get("hata"),
+            "gee_project_id": climate_2050.get("project_id") or climate_current.get("project_id") or _resolve_project_id(),
             "current": {
                 "hdd": climate_current["hdd"],
                 "yagis_mm": climate_current["yagis_mm"],
