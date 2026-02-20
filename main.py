@@ -638,9 +638,21 @@ def get_windows(cat: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 _ee_inited = False
+_ee_last_error: Optional[str] = None
+
+
+def _set_ee_error(exc: Exception):
+    global _ee_last_error
+    _ee_last_error = f"{exc.__class__.__name__}: {exc}"
+
+
+def _get_ee_error() -> Optional[str]:
+    return _ee_last_error
+
+
 
 def _init_earth_engine() -> bool:
-    global _ee_inited
+    global _ee_inited, _ee_last_error
     if _ee_inited:
         return True
     try:
@@ -650,8 +662,10 @@ def _init_earth_engine() -> bool:
         else:
             ee.Initialize()
         _ee_inited = True
+        _ee_last_error = None
         return True
-    except Exception:
+    except Exception as exc:
+        _set_ee_error(exc)
         return False
 
 
@@ -700,7 +714,8 @@ def fetch_gee_cmip6_2050(lat: float, lng: float, scenario: str) -> Optional[Dict
             "senaryo": scenario,
             "model": "MRI-ESM2-0",
         }
-    except Exception:
+    except Exception as exc:
+        _set_ee_error(exc)
         return None
 
 
@@ -716,6 +731,7 @@ def fetch_gee_2050(lat: float, lng: float, scenario: str, zone: int) -> Dict[str
         "gunes_kwh_m2": None,
         "temp_mean_c": None,
         "kaynak": "veri yok",
+        "hata": _get_ee_error(),
         "senaryo": scenario,
         "model": None,
     }
@@ -730,6 +746,7 @@ def fetch_gee_current(lat: float, lng: float, zone: int) -> Dict[str, float]:
             "gunes_kwh_m2": None,
             "temp_mean_c": None,
             "kaynak": "veri yok",
+            "hata": _get_ee_error(),
         }
 
     try:
@@ -779,6 +796,7 @@ def fetch_gee_current(lat: float, lng: float, zone: int) -> Dict[str, float]:
             "gunes_kwh_m2": None,
             "temp_mean_c": None,
             "kaynak": "veri yok",
+            "hata": _get_ee_error(),
         }
 
 
@@ -947,6 +965,7 @@ def analyze(inp: AnalyzeInput):
                 "istenen_senaryo": inp.senaryo,
                 "kullanilan_senaryo": climate_2050.get("senaryo", inp.senaryo),
                 "kullanilan_model": climate_2050.get("model"),
+                "gee_hata": climate_2050.get("hata") or climate_current.get("hata"),
                 "current": climate_current,
                 "guncel": climate_current,
                 "y2050": climate_2050,
@@ -1045,6 +1064,7 @@ def analyze(inp: AnalyzeInput):
                 "current": climate_current.get("kaynak", "veri yok"),
                 "y2050": climate_2050.get("kaynak", "veri yok"),
             },
+            "gee_hata": climate_2050.get("hata") or climate_current.get("hata"),
             "current": {
                 "hdd": climate_current["hdd"],
                 "yagis_mm": climate_current["yagis_mm"],
