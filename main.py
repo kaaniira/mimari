@@ -711,6 +711,21 @@ GEE_MODEL_CANDIDATES = [
     "GFDL-ESM4",
 ]
 
+def _candidate_models(base_collection) -> List[Optional[str]]:
+    """Build model candidate list from collection first, then static fallbacks."""
+    dynamic_models: List[str] = []
+    try:
+        raw = base_collection.aggregate_array("model").distinct().getInfo() or []
+        dynamic_models = [str(m) for m in raw if m]
+    except Exception:
+        dynamic_models = []
+
+    ordered: List[Optional[str]] = []
+    for m in dynamic_models + GEE_MODEL_CANDIDATES + [None]:
+        if m not in ordered:
+            ordered.append(m)
+    return ordered
+
 
 def fetch_gee_cmip6_2050(lat: float, lng: float, scenario: str) -> Optional[Dict[str, float]]:
     if not _init_earth_engine():
@@ -739,7 +754,7 @@ def fetch_gee_cmip6_2050(lat: float, lng: float, scenario: str) -> Optional[Dict
             except Exception:
                 last_size = None
 
-            for model in GEE_MODEL_CANDIDATES + [None]:
+            for model in _candidate_models(base):
                 coll = base.filter(ee.Filter.eq("model", model)) if model else base
                 img = coll.select(["tas", "pr", "rsds"]).mean()
                 vals = img.reduceRegion(
@@ -766,7 +781,7 @@ def fetch_gee_cmip6_2050(lat: float, lng: float, scenario: str) -> Optional[Dict
                 }
 
         _set_ee_error(RuntimeError(
-            f"GEE reduceRegion sonucu bos (tas yok), scenario={scn}, collection_size={last_size}"
+            f"GEE reduceRegion sonucu bos (tas yok), scenario={scn}, collection_size={last_size}, dynamic_models_denendi"
         ))
         return None
     except Exception as exc:
@@ -815,7 +830,7 @@ def fetch_gee_current(lat: float, lng: float, zone: int) -> Dict[str, float]:
             .filter(ee.Filter.eq("scenario", "historical"))
         )
 
-        for model in GEE_MODEL_CANDIDATES + [None]:
+        for model in _candidate_models(base):
             coll = base.filter(ee.Filter.eq("model", model)) if model else base
             img = coll.select(["tas", "pr", "rsds"]).mean()
             vals = img.reduceRegion(
@@ -845,7 +860,7 @@ def fetch_gee_current(lat: float, lng: float, zone: int) -> Dict[str, float]:
             "gunes_kwh_m2": None,
             "temp_mean_c": None,
             "kaynak": "veri yok",
-            "hata": "EEException: GEE reduceRegion sonucu bos (tas yok).",
+            "hata": "EEException: GEE reduceRegion sonucu bos (tas yok). model fallback denendi.",
             "project_id": _resolve_project_id(),
         }
     except Exception as exc:
