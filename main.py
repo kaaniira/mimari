@@ -711,6 +711,21 @@ GEE_MODEL_CANDIDATES = [
     "GFDL-ESM4",
 ]
 
+def _candidate_models(base_collection) -> List[Optional[str]]:
+    """Build model candidate list from collection first, then static fallbacks."""
+    dynamic_models: List[str] = []
+    try:
+        raw = base_collection.aggregate_array("model").distinct().getInfo() or []
+        dynamic_models = [str(m) for m in raw if m]
+    except Exception:
+        dynamic_models = []
+
+    ordered: List[Optional[str]] = []
+    for m in dynamic_models + GEE_MODEL_CANDIDATES + [None]:
+        if m not in ordered:
+            ordered.append(m)
+    return ordered
+
 
 def fetch_gee_cmip6_2050(lat: float, lng: float, scenario: str) -> Optional[Dict[str, float]]:
     if not _init_earth_engine():
@@ -720,38 +735,54 @@ def fetch_gee_cmip6_2050(lat: float, lng: float, scenario: str) -> Optional[Dict
         point = ee.Geometry.Point([lng, lat])
         scn = (scenario or "ssp245").lower()
 
-        base = (
-            ee.ImageCollection("NASA/GDDP-CMIP6")
-            .filterDate("2050-01-01", "2050-12-31")
-            .filter(ee.Filter.eq("scenario", scn))
-        )
+        # Önce tek yıl (2050), veri çıkmazsa aynı senaryoda 20 yıllık pencere dene.
+        windows = [
+            ("2050-01-01", "2050-12-31", "2050"),
+            ("2041-01-01", "2060-12-31", "2041-2060"),
+        ]
 
-        for model in GEE_MODEL_CANDIDATES + [None]:
-            coll = base.filter(ee.Filter.eq("model", model)) if model else base
-            img = coll.select(["tas", "pr", "rsds"]).mean()
-            vals = img.reduceRegion(
-                reducer=ee.Reducer.mean(), geometry=point, scale=27830, maxPixels=1e9
-            ).getInfo() or {}
+        last_size = None
+        for start_date, end_date, window_name in windows:
+            base = (
+                ee.ImageCollection("NASA/GDDP-CMIP6")
+                .filterDate(start_date, end_date)
+                .filter(ee.Filter.eq("scenario", scn))
+            )
+            # Tanı için koleksiyon boyutu
+            try:
+                last_size = base.size().getInfo()
+            except Exception:
+                last_size = None
 
-            tas_k = vals.get("tas")
-            if tas_k is None:
-                continue
+            for model in _candidate_models(base):
+                coll = base.filter(ee.Filter.eq("model", model)) if model else base
+                img = coll.select(["tas", "pr", "rsds"]).mean()
+                vals = img.reduceRegion(
+                    reducer=ee.Reducer.mean(), geometry=point, scale=27830, maxPixels=1e9
+                ).getInfo() or {}
 
-            pr_kg_m2_s = vals.get("pr")
-            rsds_w_m2 = vals.get("rsds")
-            temp_mean_c = float(tas_k) - 273.15
-            hdd = max(0.0, (18.0 - temp_mean_c) * 365.0)
-            return {
-                "hdd": round(hdd, 3),
-                "yagis_mm": None if pr_kg_m2_s is None else round(float(pr_kg_m2_s) * 86400 * 365, 3),
-                "gunes_kwh_m2": None if rsds_w_m2 is None else round(float(rsds_w_m2) * 24 * 365 / 1000, 3),
-                "temp_mean_c": round(temp_mean_c, 3),
-                "kaynak": "gee-cmip6",
-                "senaryo": scn,
-                "model": model or "ENSEMBLE_MEAN",
-            }
+                tas_k = vals.get("tas")
+                if tas_k is None:
+                    continue
 
-        _set_ee_error(RuntimeError(f"GEE reduceRegion sonucu bos (tas yok), scenario={scn}"))
+                pr_kg_m2_s = vals.get("pr")
+                rsds_w_m2 = vals.get("rsds")
+                temp_mean_c = float(tas_k) - 273.15
+                hdd = max(0.0, (18.0 - temp_mean_c) * 365.0)
+                return {
+                    "hdd": round(hdd, 3),
+                    "yagis_mm": None if pr_kg_m2_s is None else round(float(pr_kg_m2_s) * 86400 * 365, 3),
+                    "gunes_kwh_m2": None if rsds_w_m2 is None else round(float(rsds_w_m2) * 24 * 365 / 1000, 3),
+                    "temp_mean_c": round(temp_mean_c, 3),
+                    "kaynak": "gee-cmip6",
+                    "senaryo": scn,
+                    "model": model or "ENSEMBLE_MEAN",
+                    "zaman_penceresi": window_name,
+                }
+
+        _set_ee_error(RuntimeError(
+            f"GEE reduceRegion sonucu bos (tas yok), scenario={scn}, collection_size={last_size}, dynamic_models_denendi"
+        ))
         return None
     except Exception as exc:
         _set_ee_error(exc)
@@ -799,7 +830,7 @@ def fetch_gee_current(lat: float, lng: float, zone: int) -> Dict[str, float]:
             .filter(ee.Filter.eq("scenario", "historical"))
         )
 
-        for model in GEE_MODEL_CANDIDATES + [None]:
+        for model in _candidate_models(base):
             coll = base.filter(ee.Filter.eq("model", model)) if model else base
             img = coll.select(["tas", "pr", "rsds"]).mean()
             vals = img.reduceRegion(
@@ -829,7 +860,7 @@ def fetch_gee_current(lat: float, lng: float, zone: int) -> Dict[str, float]:
             "gunes_kwh_m2": None,
             "temp_mean_c": None,
             "kaynak": "veri yok",
-            "hata": "EEException: GEE reduceRegion sonucu bos (tas yok).",
+            "hata": "EEException: GEE reduceRegion sonucu bos (tas yok). model fallback denendi.",
             "project_id": _resolve_project_id(),
         }
     except Exception as exc:
