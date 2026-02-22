@@ -28,7 +28,7 @@ PROJECT_ID = (
 )
 
 DETECTED_PROJECT_ID: Optional[str] = None
-
+#a 
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin").strip()
 ADMIN_PASS = os.environ.get("ADMIN_PASS", "").strip()
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "").strip()  # MUST set!
