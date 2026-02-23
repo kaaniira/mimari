@@ -559,6 +559,16 @@ TS825_U_WALL_MAX_BY_ZONE = {
     4: 0.40,
 }
 
+DEFAULT_RSI_WALL = 0.13
+DEFAULT_RSE_WALL = 0.04
+
+
+def calc_u_wall_ts825(r_layers: float, lambda_h: float, thickness_m: float, rsi: float = DEFAULT_RSI_WALL, rse: float = DEFAULT_RSE_WALL) -> float:
+    """TS 825 Madde 5.3: U = 1 / (Rsi + R + Rse), R = d/lambda_h."""
+    r_mat = max(0.0, float(thickness_m)) / max(1e-6, float(lambda_h))
+    r_total = max(1e-6, float(rsi) + max(0.0, float(r_layers)) + r_mat + float(rse))
+    return 1.0 / r_total
+
 TS825_ZONE_BY_PROVINCE = {
     "ADANA": 1, "ANTALYA": 1, "MERSIN": 1, "HATAY": 1, "MUĞLA": 1, "MUGLA": 1, "AYDIN": 1, "İZMİR": 1, "IZMIR": 1,
     "TEKİRDAĞ": 2, "TEKIRDAG": 2, "BALIKESİR": 2, "BALIKESIR": 2, "BURSA": 2, "İSTANBUL": 2, "ISTANBUL": 2,
@@ -936,7 +946,7 @@ def evaluate_option(ins: Dict[str, Any], win: Dict[str, Any], metrics: Dict[str,
     lam = max(0.01, float(ins.get("lambda_value", 0.04) or 0.04))
     t_cm = max(1.0, float(ins.get("kalinlik_cm", 5) or 5))
     t_m = t_cm / 100.0
-    u_wall = 1.0 / max(0.05, float(r_base) + (t_m / lam))
+    u_wall = calc_u_wall_ts825(r_base, lam, t_m)
 
     u_win = max(0.8, float(win.get("u_value", 2.8) or 2.8))
 
@@ -1014,7 +1024,7 @@ def analyze(inp: AnalyzeInput):
     insulations = get_insulations(cat)
     r_base = max(0.05, inp.r_base_layers)
     for ins in insulations:
-        req_t_m = max(0.01, (1.0 / u_wall_max - r_base) * float(ins["lambda_value"]))
+        req_t_m = max(0.01, (1.0 / u_wall_max - DEFAULT_RSI_WALL - r_base - DEFAULT_RSE_WALL) * float(ins["lambda_value"]))
         ins["kalinlik_cm"] = round_up_5(req_t_m * 100.0)
 
     climate_current = fetch_gee_current(inp.lat, inp.lng, zone)
